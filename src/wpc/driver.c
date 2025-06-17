@@ -434,6 +434,7 @@ DRIVERNV(ffv104)        // 10/96    Flipper Football (1.04)
 DRIVERNV(bbb108)        // 11/96    Big Bang Bar (Beta 1.8)
 DRIVERNV(bbb109)        // 11/96    Big Bang Bar (Beta 1.9)
 DRIVERNV(kpb105)        // 12/96    Kingpin (Beta 1.05)
+                        // 12/96    Zingy Bingy (whitewood, but basic rule ROM exists)
 
 // ----------------
 // CICPLAY GAMES
@@ -457,6 +458,7 @@ DRIVER(lwar,e90)        //               05/87 Laser War (9.0 Europe)
 //4 x 2 x 7 (mixed) A/N Display
 DRIVER(ssvc,a26)        //Data East MPU: 03/88 Secret Service (2.6)
 DRIVER(ssvc,b26)        //               03/88 Secret Service (2.6 Alternate Sound)
+DRIVER(ssvc,e40)        //               03/88 Secret Service (4.0 Europe)
 DRIVER(ssvc,a42)        //               03/88 Secret Service (4.2 Alternate Sound)
 DRIVER(torp,e21)        //Data East MPU: 08/88 Torpedo Alley (2.1 Europe)
 DRIVER(torp,a16)        //               08/88 Torpedo Alley (1.6)
@@ -815,6 +817,9 @@ DRIVERNV(victoryg)      //                Victory (German)
 DRIVERNV(victrgfp)      //                Victory (German Free Play)
 DRIVERNV(victoryf)      //                Victory (French)
 DRIVERNV(victrffp)      //                Victory (French Free Play)
+DRIVERNV(victr101)      //                Victory (1.01 multiplayer MOD)
+DRIVERNV(victr11)       //                Victory (1.1 multiplayer MOD)
+DRIVERNV(victr12)       //          03/25 Victory (1.2 multiplayer MOD)
 DRIVERNV(diamond)       //S80b-711: 02/88 Diamond Lady
 DRIVERNV(diamonfp)      //                Diamond Lady (Free Play)
 DRIVERNV(diamondg)      //                Diamond Lady (German)
@@ -891,11 +896,13 @@ DRIVERNV(smb)           //S3-733:   04/92 Super Mario Bros.
 DRIVERNV(smb1)          //                Super Mario Bros. (rev.1)
 DRIVERNV(smb2)          //                Super Mario Bros. (rev.2)
 DRIVERNV(smb3)          //                Super Mario Bros. (rev.3)
+DRIVERNV(smbv)          //                Super Mario Bros. (Spanish / Vifico license)
 DRIVERNV(smbmush)       //S3-N105:  06/92 Super Mario Bros. Mushroom World
 DRIVERNV(cueball)       //S3-734:   10/92 Cue Ball Wizard
 DRIVERNV(cueball1)      //          10/92 Cue Ball Wizard (older display rev.)
 DRIVERNV(cueball2)      //          10/92 Cue Ball Wizard (rev.2)
 DRIVERNV(cueball3)      //          10/92 Cue Ball Wizard (rev.3)
+DRIVERNV(cueballv)      //          ??/92 Cue Ball Wizard (Spanish / Vifico license)
 DRIVERNV(sfight2)       //S3-735:   03/93 Street Fighter II
 DRIVERNV(sfight2a)      //                Street Fighter II (rev.1)
 DRIVERNV(sfight2b)      //                Street Fighter II (rev.2)
@@ -984,6 +991,7 @@ DRIVERNV(corsarfp)      //Corsario (Free Play)
 DRIVERNV(mundial )      //Mundial 90 (1990)
 DRIVERNV(mundiafp)      //Mundial 90 (Free Play)
 DRIVERNV(larana  )      //La Rana (1990)
+DRIVERNV(larana2 )      //La Rana (1990, alternate set)
 DRIVERNV(atleta  )      //Atleta (1991)
 DRIVERNV(ind250cc)      //250 CC (1992)
 DRIVERNV(metalman)      //Metal Man (1992)
@@ -1107,7 +1115,9 @@ DRIVERNV(mmmaster)      //Master (1988)
 // MICROPIN GAMES
 // ----------------
 DRIVERNV(pentacup)      //Pentacup (rev. 1, 1978)
-DRIVERNV(pentacp2)      //Pentacup (rev. 2, 1980)
+DRIVERNV(pentacps)      //Pentacup (rev. S, 1980)
+DRIVERNV(pentacpt)      //Pentacup (rev. T, 1980)
+DRIVERNV(pentacp2)      //Pentacup (rev. 2, 1981)
 
 // ----------------
 // MIDWAY GAMES
@@ -1252,6 +1262,7 @@ DRIVERNV(ggatea)        // 19?? - Golden Gate (set 2) (Bingo)
 // 1978 - MONTE ROSA
 // 1978 - CHA-CHA-CHA
 // 1979 - ADVENTURE
+// 1979 - RODEO (4P)
 
 //Data East Hardware, DMD 192x64
 DRIVER  (mav,100)       //DE/Sega MPU: 10/94 Maverick, The Movie (1.00)
@@ -1280,13 +1291,18 @@ DRIVER  (bmf,ch)        //             07/95 Batman Forever (Swiss)
 DRIVER  (bmf,cn)        //             07/95 Batman Forever (Canadian)
 DRIVER  (bmf,de)        //             07/95 Batman Forever (German)
 DRIVER  (bmf,fr)        //             07/95 Batman Forever (French)
-DRIVER  (bmf,nl)        //             07/95 Batman Forever (Dutch)
-DRIVER  (bmf,it)        //             07/95 Batman Forever (Italian)
+DRIVER  (bmf,nl)        //             11/95 Batman Forever (4.0 Dutch)
+DRIVER  (bmf,nl302)     //             08/95 Batman Forever (3.02 Dutch)
+DRIVER  (bmf,it)        //             11/95 Batman Forever (4.0 Italian, Display 4.01)
+DRIVER  (bmf,it2)       //             09/95 Batman Forever (4.0 Italian, Display 4.0)
+DRIVER  (bmf,it3)       //             09/95 Batman Forever (4.0 Italian, Display 4.0, Early sound)
 DRIVER  (bmf,sp)        //             07/95 Batman Forever (Spanish)
 DRIVER  (bmf,no)        //             07/95 Batman Forever (Norwegian)
 DRIVER  (bmf,sv)        //             07/95 Batman Forever (Swedish)
 DRIVER  (bmf,jp)        //             07/95 Batman Forever (Japanese)
 DRIVER  (bmf,time)      //             07/95 Batman Forever (Timed Version)
+DRIVERNV(batmanf5)      //             07/24 Batman Forever (5.0 unofficial MOD)
+DRIVERNV(batmanf501)    //             01/25 Batman Forever (5.01 unofficial MOD)
 DRIVERNV(ctcheese)      //DE/Sega MPU: ??/96 Cut The Cheese (Redemption)
 //Whitestar Hardware, DMD 128x32
 DRIVERNV(apollo1)       //Whitestar: 11/95 Apollo 13 (1.00)
@@ -1347,7 +1363,7 @@ DRIVER  (harl,l13)      //           10/99 Harley-Davidson (Sega, 1.03 Spanish)
 // ----------------
 DRIVERNV(bikerace)      // 1992 - Bike Race
 DRIVERNV(bikerac2)      // 1992 - Bike Race (2-ball play)
-DRIVERNV(sleicpin)      // 1993 - Pin-Ball
+DRIVERNV(sleicpin)      // 1993 - Sleic Pin-Ball
 DRIVERNV(iomoon)        // 1994 - Io Moon
                         // 1996 - Dona Elvira 2
 
@@ -1421,6 +1437,8 @@ DRIVERNV(pinball)       //MPU-100: 07/77 Pinball
 DRIVERNV(pinbalfp)      //         07/77 Pinball (Free Play)
 DRIVERNV(stars)         //MPU-100: 03/78 Stars
 DRIVERNV(starsfp)       //         03/78 Stars (Free Play)
+DRIVERNV(starsb)        //         10/24 Stars (MOD rev. 103)
+DRIVERNV(starsb7)       //         01/25 Stars (MOD rev. 103, 7-digit conversion)
 DRIVERNV(memlane)       //MPU-100: 06/78 Memory Lane
 DRIVERNV(memlanfp)      //         06/78 Memory Lane (Free Play)
 // MPU-100 - Sound Board: SB-100
@@ -1473,27 +1491,33 @@ DRIVERNV(galaxyc)       //         03/23 Galaxy (7-Digit conversion, Fixes & mod
 DRIVERNV(ali)           //MPU-200: 03/80 Ali
 DRIVERNV(alifp)         //         03/80 Ali (Free Play)
 DRIVERNV(alib)          //         03/23 Ali (7-Digit conversion Free Play rev. 76)
+DRIVERNV(alic)          //         05/23 Ali (7-Digit conversion Free Play rev. 85)
 DRIVERNV(biggame)       //MPU-200: 03/80 Big Game
 DRIVERNV(biggamfp)      //         03/80 Big Game (Free Play)
 DRIVERNV(biggameb)      //         11/19 Big Game (MOD rev. 7)
 DRIVERNV(biggamec)      //         10/20 Big Game (MOD rev. 8)
 DRIVERNV(biggamed)      //         09/21 Big Game (MOD rev. 9)
 DRIVERNV(biggamee)      //         12/23 Big Game (MOD rev. 12)
+DRIVERNV(biggamef)      //         11/24 Big Game (MOD rev. 13)
 DRIVERNV(seawitch)      //MPU-200: 05/80 Seawitch
 DRIVERNV(seawitfp)      //         05/80 Seawitch (Free Play)
 DRIVERNV(seawitcha)     //         10/21 Seawitch (MOD rev. 5)
 DRIVERNV(seawitchb)     //         11/21 Seawitch (MOD rev. 6)
 DRIVERNV(seawitchc)     //         11/21 Seawitch (MOD rev. 7)
 DRIVERNV(seawitchd)     //         11/21 Seawitch (MOD rev. 8)
+DRIVERNV(seawitche)     //         04/23 Seawitch (MOD rev. 9)
+DRIVERNV(seawitchf)     //         01/24 Seawitch (MOD rev. 9.3)
 DRIVERNV(cheetah)       //MPU-200: 06/80 Cheetah (Black cabinet)
 DRIVERNV(cheetahb)      //         06/80 Cheetah (Blue cabinet)
 DRIVERNV(cheetafp)      //         06/80 Cheetah (Black cabinet Free Play)
 DRIVERNV(cheetah1)      //         06/80 Cheetah (Black cabinet Bonus shot 1/game)
 DRIVERNV(cheetah2)      //         03/11 Cheetah (Black cabinet Bonus shot 1/ball)
 DRIVERNV(cheetahb2)     //         06/18 Cheetah (Blue cabinet Bonus shot 1/ball)
+DRIVERNV(cheetah84)     //         10/23 Cheetah (Prototype Sounds + MOD 84)
 DRIVERNV(quicksil)      //MPU-200: 06/80 Quicksilver
 DRIVERNV(quicksfp)      //         06/80 Quicksilver (Free Play)
 DRIVERNV(quicksib)      //         05/21 Quicksilver (Free Play & modified rules rev. 07D)
+DRIVERNV(quicksic)      //         01/24 Quicksilver (Free Play & modified rules rev. 8.1)
 DRIVERNV(stargzr)       //MPU-200: 08/80 Star Gazer
 DRIVERNV(stargzfp)      //         08/80 Star Gazer (Free Play)
 DRIVERNV(stargzrb)      //         03/06 Star Gazer (modified rules rev. 9)
@@ -1513,6 +1537,7 @@ DRIVERNV(lightnin)      //MPU-200: 03/81 Lightning
 DRIVERNV(lightnfp)      //         03/81 Lightning (Free Play)
 DRIVERNV(lightnib)      //         09/21 Lightning (Free Play & MOD rev. 19)
 DRIVERNV(lightnic)      //         10/22 Lightning (Free Play & MOD rev. 25)
+DRIVERNV(lightnid)      //         12/24 Lightning (Free Play & MOD rev. 27)
 DRIVERNV(splitsec)      //MPU-200: 08/81 Split Second
 DRIVERNV(splitsfp)      //         08/81 Split Second (Free Play)
 DRIVERNV(catacomb)      //MPU-200: 10/81 Catacomb
@@ -1529,6 +1554,8 @@ DRIVERNV(dragfib2)      //         01/82 Dragonfist (MOD 2 - modified to match i
 DRIVERNV(dragfis3)      //         03/20 Dragonfist (MOD 3 rev. 1105)
 DRIVERNV(dragfis3b)     //         06/20 Dragonfist (MOD 3 rev. 1109)
 DRIVERNV(dragfis14)     //         09/21 Dragonfist (MOD 14)
+DRIVERNV(dragfis15)     //         04/23 Dragonfist (MOD 15)
+DRIVERNV(dragfis16)     //         09/24 Dragonfist (MOD 16)
 DRIVERNV(orbitor1)      //MPU-200: 04/82 Orbitor 1
 DRIVERNV(orbitofp)      //         04/82 Orbitor 1 (Free Play)
 DRIVERNV(orbitora)      //         04/82 Orbitor 1 (MOD)
@@ -2604,6 +2631,8 @@ DRIVER(comet,l5)        //          06/85 W Comet (L-5)
 DRIVER(alcat,l7)        //S11-918:  ??/85 W Alley Cats (Shuffle)
 DRIVER(hs,l3)           //S11-541:  01/86 W High Speed (L-3)
 DRIVER(hs,l4)           //          01/86 W High Speed (L-4)
+//DRIVER(hs,g3)          //          01/86 W High Speed (G-3)
+DRIVER(hs,p4g)          //          01/86 W High Speed (G-4 / German PROTO4)
 DRIVER(hs,l4c)          //          05/18 W High Speed (L-4C Competition MOD (f43c))
 DRIVER(grand,l1)        //S11-523:  04/86 W Grand Lizard (L-1)
 DRIVER(grand,l3)        //          04/86 W Grand Lizard (L-3)
@@ -2699,6 +2728,8 @@ DRIVER(bcats,l2)        //S11-575:  11/89 W Bad Cats (LA-2)
 DRIVER(bcats,g4)        //          11/89 W Bad Cats (LG-4)
 DRIVER(bcats,l5)        //          11/89 W Bad Cats (L-5)
 DRIVER(bcats,tcm)       //          12/23   Bad Cats (The Cat's Meow MOD)
+DRIVER(bcats,tcm12)     //          12/24   Bad Cats (The Cat's Meow MOD 1.2)
+DRIVER(bcats,tcm13)     //          03/25   Bad Cats (The Cat's Meow MOD 1.3)
 DRIVER(rvrbt,l3)        //S11-1966: 11/89 W Riverboat Gambler (L-3)
 DRIVER(rvrbt,p7)        //          11/89 W Riverboat Gambler (PA-7 Prototype)
 DRIVER(mousn,l1)        //S11-1635: 11/89 B Mousin' Around! (LA-1)
@@ -3282,7 +3313,8 @@ DRIVERNV(locomotn)      //09/81 Locomotion
 DRIVERNV(locomotnf)     //      Locomotion (Free Play)
                         //04/82 Pinball Champ '82 (using the same roms as the '83 version)
 DRIVERNV(socrking)      //09/82 Soccer Kings
-DRIVERNV(socrkina)      //      Soccer Kings (alternate set)
+DRIVERNV(socrkina)      //      Soccer Kings (alternate set / upper playfield bug)
+DRIVERNV(socrkin2)      //      Soccer Kings (alternate set 2)
 DRIVERNV(socrkngi)      //      Soccer Kings (Italian Speech)
 DRIVERNV(socrkngg)      //      Soccer Kings (German Speech)
 DRIVERNV(sockfp)        //      Soccer Kings (Free Play)

@@ -81,11 +81,11 @@ static INTERRUPT_GEN(s7_vblank) {
   s7locals.vblankCount++;
   /*-- lamps --*/
   if ((s7locals.vblankCount % S7_LAMPSMOOTH) == 0) {
-    memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+    memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
 #if defined(LISY_SUPPORT)
     lisy_w_lamp_handler( );
 #endif
-    memset(coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+    memset((void*)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
   }
   /*-- solenoids --*/
   if (s7locals.ssEn) {
@@ -222,7 +222,7 @@ static void updsol(void) {
   if (core_gameData->sxx.muxSol) {
     if (coreGlobals.pulsedSolState & (1 << (core_gameData->sxx.muxSol - 1))) {
       /* active mux */
-      UINT32 muxsol = core_gameData->hw.gameSpecific2; // mux affected solenoids
+      UINT32 muxsol = core_gameData->hw.gameSpecific2; // mux affected solenoids (for Defender only so far)
       s7locals.custSol            = coreGlobals.pulsedSolState & muxsol;
       coreGlobals.pulsedSolState &= ~muxsol;
     }

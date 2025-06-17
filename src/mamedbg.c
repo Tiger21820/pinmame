@@ -1793,7 +1793,7 @@ static void trace_output( void )
 			if( TRACE.regs[0] )
 			{
 #ifdef CONFIG_FOR_FREEWPC
-				dst += sprintf (dst, "#%u ", activecpu_gettotalcycles ());
+				dst += sprintf (dst, "#%u ", activecpu_gettotalcycles64 ());
 #endif
 				for( i = 0; i < MAX_REGS && TRACE.regs[i]; i++ )
 					dst += sprintf( dst, "%s ", activecpu_dump_reg(TRACE.regs[i]) );
@@ -3506,7 +3506,7 @@ static int edit_cmds_parse( char *cmdline )
 		if( !strncmp( cmdline, commands[i].name, l ) && !isalnum( cmdline[l] ) )
 		{
 			while( cmdline[l] && isspace( cmdline[l] ) ) l++;
-			strcpy( cmdline, cmdline + l );
+			memmove( cmdline, cmdline + l, strlen(cmdline+l) + 1);
 			return i;
 		}
 		if( commands[i].alias )
@@ -3515,7 +3515,7 @@ static int edit_cmds_parse( char *cmdline )
 			if( !strncmp( cmdline, commands[i].alias, l ) && !isalnum( cmdline[l] ) )
 			{
 				while( cmdline[l] && isspace( cmdline[l] ) ) l++;
-				strcpy( cmdline, cmdline + l );
+				memmove( cmdline, cmdline + l, strlen(cmdline+l) + 1);
 				return i;
 			}
 		}

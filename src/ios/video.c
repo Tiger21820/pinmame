@@ -232,11 +232,16 @@ void SetThrottleAdj(int adj)
  * throttle_speed
  */
 
+extern int time_fence_is_supported();
 static void throttle_speed(void) {
 	static double ticks_per_sleep_msec = 0;
 	cycles_t target;
 	cycles_t curr;
 	cycles_t cps;
+
+	// if we're only syncing on an emulation fence, bail now
+	if (options.time_fence != 0 && time_fence_is_supported())
+		return;
 
 	profiler_mark(PROFILER_IDLE);
 

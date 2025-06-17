@@ -405,6 +405,8 @@ struct hc55516_data
 			int charge_shift;
 			int charge_add;
 			int decay_shift;
+
+			double gain;
 		} intg;
 
 		// Floating-point arithmetic, used in original MAME implementation
@@ -750,11 +752,14 @@ static void process_bit_HC555XX(struct hc55516_data *chip, const UINT8 bit, cons
 	// shift the bit into the shift register
 	chip->shiftreg = ((chip->shiftreg << 1) | bit) & SHIFTMASK;
 
-	// apply the syllabic filter charge update (in floating-point terms,
+	// Apply the syllabic filter charge update (in floating-point terms,
 	// this is calculating syl *= 31/32 or syl *= 63/64, depending upon
-	// the charge_mask/charge_shift parameters)
+	// the charge_mask/charge_shift parameters).  This part is common to
+	// coincidence (last 3 bits were the same) or non-coincidence.
 	chip->filter.intg.syl_reg += (~chip->filter.intg.syl_reg & chip->filter.intg.charge_mask) >> chip->filter.intg.charge_shift;
-	if ((chip->shiftreg ^ SHIFTMASK) != 0)
+
+	// add extra charge on non-coincidence
+	if (chip->shiftreg != 0 && chip->shiftreg != SHIFTMASK)
 		chip->filter.intg.syl_reg += chip->filter.intg.charge_add;
 
 	// mask the syllabic filter register to 12 bits, per the HC555XX hardware
@@ -812,7 +817,7 @@ static void process_bit_HC555XX(struct hc55516_data *chip, const UINT8 bit, cons
 // any range compression.
 static float flat_loudness(struct hc55516_data *chip, double sample)
 {
-	return (float)sample;
+	return (float)(sample * chip->filter.intg.gain);
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,12 +1161,19 @@ void hc55516_clock_w(int num, int state)
 
 // Set the gain, as a multiple of the default gain.  The default gain
 // yields a 1:1 mapping from the full dynamic range of the HC55516 to
-// the full dynamic range of the MAME stream.  This only applies when
-// using the old PinMAME implementation - it's ignored for the new
-// decap chip logic version.
-void hc55516_set_gain(int num, double gain)
+// the full dynamic range of the MAME stream.
+void hc55516_set_mixing_level(int num, double gain)
 {
-	hc55516[num].filter.dbl.gain = gain * DEFAULT_GAIN;
+	if (gain < 1.0)
+	{
+		mixer_set_mixing_level(hc55516[num].channel, (int)(gain * 100.));
+		gain = 1.0;
+	}
+	else
+		mixer_set_mixing_level(hc55516[num].channel, 100);
+
+	hc55516[num].filter.dbl.gain = gain * DEFAULT_GAIN; // for hc55516_use_chip_logic == 0
+	hc55516[num].filter.intg.gain = gain; // for hc55516_use_chip_logic == 1
 }
 
 // Set the data bit input.  This just latches the bit for later processing,
@@ -1278,10 +1290,23 @@ int hc55516_sh_start(const struct MachineSound *msound)
 			chip->process_bit = process_bit_HC555XX;
 			chip->compress_loudness = flat_loudness;
 
+			// set the default parameters for this version of the filter
+			if (intf->volume[i] > 100)
+				chip->filter.intg.gain = intf->volume[i]/100.0;
+			else
+				chip->filter.intg.gain = 1.0;
+
 			// Populate the filter parameters according to the chip type
-			if (intf->chip_type == 55516)
+			if (intf->chip_type == 55516 || intf->chip_type == 55536 || intf->chip_type == 55564)
 			{
-				// 55516 parameters
+				// 55516 parameters.  These were obtained from the MAME decap analysis.
+				// 
+				// The 55536 and 55564 use the same parameters, or so it seems from the 
+				// data sheets (this hasn't been verified by decap analysis).  These
+				// chips are also believed to include a fix for a bug in the -16 that 
+				// prevented it from reaching a constant 0V at the output, which caused 
+				// a known noise ("humming") bug with the older chip.  (I'm not sure
+				// whether or not the MAME algorithm implemented here includes the fix.)
 				chip->filter.intg.charge_mask = 0xFC0;
 				chip->filter.intg.charge_shift = 6;
 				chip->filter.intg.charge_add = 0xFC1;
@@ -1289,24 +1314,11 @@ int hc55516_sh_start(const struct MachineSound *msound)
 
 				chip->filter.intg.syl_reg = 0x3F;
 			}
-			else if (intf->chip_type == 55532 || intf->chip_type == 55536 || intf->chip_type == 55564)
+			else if (intf->chip_type == 55532)
 			{
-				// 55532 parameters.
-				//
-				// The MAME/decap analysis had nothing to say about the 55536 variant, but
-				// from the data sheet, it appears that the 55536 is identical to the
-				// 55532 except that the encoder stage isn't included.  So we'll take
-				// the decoder filter parameters to be identical to the '32.
-				//
-				// The same goes for the '64.  That chip appears to be identical to
-				// the '32 except that it's rated for higher maximum bit clock rates.
-				//
-				// Note that the newer revision '36/'64 may(!) have had some additional bugfixes
-				// where the older chips did not fully allow to get a constant 0 output,
-				// which may have lead to a 'humming' issue with these.
-				//
-				// Also note that the following 55532 params are not verified by a real
-				// decap yet, but are derived from implicit information from the 55516 decap.
+				// 55532 parameters.  The MAME decap analysis didn't include this chip,
+				// so these are only inferred, based on the chip's optimization for 
+				// 32 kHz clocking.
 				chip->filter.intg.charge_mask = 0xF80;
 				chip->filter.intg.charge_shift = 7;
 				chip->filter.intg.charge_add = 0xFE1;
@@ -1336,7 +1348,10 @@ int hc55516_sh_start(const struct MachineSound *msound)
 			chip->compress_loudness = compress_loudness;
 
 			// set the default parameters for this version of the filter
-			chip->filter.dbl.gain = DEFAULT_GAIN;
+			if (intf->volume[i] > 100)
+				chip->filter.dbl.gain = DEFAULT_GAIN * intf->volume[i] / 100.0;
+			else
+				chip->filter.dbl.gain = DEFAULT_GAIN;
 		}
 
 		// create the output stream
@@ -1349,7 +1364,7 @@ int hc55516_sh_start(const struct MachineSound *msound)
 		default:    sprintf(name, "unknown HC555XX #%d", i); break;
 		}
 
-		chip->channel = stream_init_float(name, intf->volume[i], Machine->sample_rate, i, hc55516_update, 1); // pick output sample rate for max quality, also saves an additional filtering step in the mixer!
+		chip->channel = stream_init_float(name, MIN(intf->volume[i],100), Machine->sample_rate, i, hc55516_update, 1); // pick output sample rate for max quality, also saves an additional filtering step in the mixer!
 		chip->stream_update_time = timer_get_time();
 		chip->output_dt = 1.0 / Machine->sample_rate;
 		if (chip->channel == -1)

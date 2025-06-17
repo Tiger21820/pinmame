@@ -47,10 +47,10 @@ enum { LIST_SHORT = 1, LIST_INFO, LIST_XML, LIST_FULL, LIST_SAMDIR, LIST_ROMS, L
 
 #ifndef MESS
 #define YEAR_BEGIN 1974
-#define YEAR_END   2024
+#define YEAR_END   2025
 #else
 #define YEAR_BEGIN 1950
-#define YEAR_END   2024
+#define YEAR_END   2025
 #endif
 
 static int list = 0;
@@ -483,7 +483,7 @@ int frontend_help (const char *gamename)
 #endif
 	
 		printf("PinMAME v%s\nPinball's Multiple Arcade Machine Emulator\n"
-				"Copyright (C) 2000-2024 by the PinMAME Team\n\n",tmp);
+				"Copyright (C) 2000-2025 by the PinMAME Team\n\n",tmp);
 		showdisclaimer();
 		printf("Usage:  PINMAME gamename [options]\n\n"
 				"        -list         for a brief list of supported games\n"
@@ -1642,11 +1642,11 @@ j = 0;	// count only the main cpu
 
 
 		case LIST_INFO: /* list all info */
-			print_mame_info( stdout, drivers );
+			print_mame_info( stdout, (const struct GameDriver **)drivers );
 			return 0;
 
 		case LIST_XML: /* list all info */
-			print_mame_xml( stdout, drivers );
+			print_mame_xml( stdout, (const struct GameDriver **)drivers );
 			return 0;
 	}
 

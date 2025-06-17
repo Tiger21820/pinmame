@@ -141,24 +141,6 @@ static NVRAM_HANDLER(cc);
 static void Skip_Error_Msg(void);
 
 static INTERRUPT_GEN(cc_vblank) {
-  /*-------------------------------
-  /  copy local data to interface
-  /--------------------------------*/
-  // TODO Why do we delay lamps/solenoids until VBLANK ? this creates artificial latency, direct set/callback would be better at least for solenoids
-
-  /*-- lamps --*/
-  memset(coreGlobals.lampMatrix, 0, sizeof(coreGlobals.lampMatrix));
-  for (int i = 0; i < 8 + core_gameData->hw.lampCol; i++)
-    for (int j = 0; j < 8; j++)
-      if (coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + i * 8 + j].value >= 0.1f)
-        coreGlobals.lampMatrix[i] |= 1 << j;
-
-  /*-- solenoids --*/
-  coreGlobals.solenoids = 0;
-  for (int i = 0; i < 32; i++)
-    if (coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i].value >= 0.5f)
-      coreGlobals.solenoids |= 1 << i;
-
   /*-- update leds (they are PWM faded, so uses physic output) --*/
   coreGlobals.diagnosticLed = (coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 8 * 8 + (core_gameData->hw.lampCol - 1) * 8    ].value >= 0.5f ? 1 : 0)
                             | (coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 8 * 8 + (core_gameData->hw.lampCol - 1) * 8 + 1].value >= 0.5f ? 2 : 0);
@@ -736,33 +718,42 @@ static MACHINE_INIT(cc) {
   const char* const gn = rootDrv->name;
   // For flashers, Capcom uses #89 bulb wired through a STP20N10L Mosfet, 0.02 ohms resistor to a 20V DC source
   // which is very similar to what Williams uses on WPC hardware, so just uses CORE_MODOUT_BULB_89_20V_DC_WPC
-  if (strncasecmp(gn, "abv106", 6) == 0) { // Airborne
+  if (strncasecmp(gn, "abv", 3) == 0) { // Airborne
     coreGlobals.flipperCoils = 0xFFFFFFFFFFFF0908ull;
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
   } 
-  else if (strncasecmp(gn, "bbb109", 6) == 0) { // Big Bang Bar
+  else if (strncasecmp(gn, "bbb", 3) == 0) { // Big Bang Bar
     coreGlobals.flipperCoils = 0xFFFFFFFFFF0A0908ull;
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 6, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "bsv103", 6) == 0) { // Breakshot
+  else if (strncasecmp(gn, "bsv", 3) == 0) { // Breakshot
     coreGlobals.flipperCoils = 0xFFFFFFFFFF0A0908ull;
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC); // Center pocket Flasher
     // core_set_pwm_output_type(CORE_MODOUT_SOL0 + 27 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC); // Plunger Flasher (appears in doc but was not kept in production)
   }
-  else if (strncasecmp(gn, "ffv104", 6) == 0) { // Flipper Football
+  else if (strncasecmp(gn, "ffv", 3) == 0) { // Flipper Football
     coreGlobals.flipperCoils = 0xFFFFFFFF0B0A0908ull;
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "kpb105", 6) == 0) { // KingPin
+  else if (strncasecmp(gn, "kpb", 3) == 0) { // KingPin
     // To be checked since this is from VPX table (did not find a manual for this one)
     coreGlobals.flipperCoils = 0xFFFFFFFFFFFF0908ull;
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1,  2, CORE_MODOUT_BULB_89_20V_DC_WPC);
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 11, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "pmv112", 6) == 0) { // Pinball Magic
+  else if (strncasecmp(gn, "pmv", 3) == 0) { // Pinball Magic
     coreGlobals.flipperCoils = 0xFFFFFFFFFFFF0908ull;
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 11, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
+  // Defaults to 2 state legacy integrator for better backward compatibility
+  if ((options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL)) == 0)
+     for (int i = 0; i < coreGlobals.nSolenoids; i++)
+        if (coreGlobals.physicOutputState[i].type != CORE_MODOUT_SOL_2_STATE)
+           core_set_pwm_output_type(CORE_MODOUT_SOL0, 1, CORE_MODOUT_LEGACY_SOL_2_STATE);
+  if ((options.usemodsol & CORE_MODOUT_ENABLE_PHYSOUT_LAMPS) == 0)
+     core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80 /*coreGlobals.nLamps*/, CORE_MODOUT_LEGACY_SOL_2_STATE);
+  if ((options.usemodsol & CORE_MODOUT_ENABLE_PHYSOUT_GI) == 0)
+     core_set_pwm_output_type(CORE_MODOUT_GI0, coreGlobals.nGI, CORE_MODOUT_LEGACY_SOL_2_STATE);
 
   //Init soundboard
   sndbrd_0_init(core_gameData->hw.soundBoard, CAPCOMS_CPUNO, memory_region(CAPCOMS_ROMREGION),NULL,NULL);
@@ -946,25 +937,20 @@ MACHINE_DRIVER_END
 /*** 128 X 32 NORMAL SIZE DMD ***/
 /********************************/
 PINMAME_VIDEO_UPDATE(cc_dmd128x32) {
-  int ii, jj, kk;
-  UINT16 *RAM;
-
-  UINT32 offset = locals.visible_page ? 0x800 * locals.visible_page - 0x10 : 0;
-  RAM = ramptr+offset;
-  for (ii = 0; ii <= 32; ii++) {
-    UINT8 *line = &coreGlobals.dotCol[ii][0];
-    for (kk = 0; kk < 16; kk++) {
+  const UINT16 *RAM = ramptr + 0x800 * locals.visible_page + 0x10;
+  UINT8* line = &coreGlobals.dmdDotRaw[0];
+  for (int ii = 0; ii < 32; ii++) {
+    for (int kk = 0; kk < 16; kk++) {
       UINT16 intens1 = RAM[0];
-      for(jj=0;jj<8;jj++) {
-         *line++ = (intens1&0xc000)>>14;
+      for(int jj = 0; jj < 8; jj++) {
+         *line++ = (intens1 >> 14) & 0x0003;
          intens1 <<= 2;
       }
-      RAM+=1;
+      RAM += 1;
     }
-    *line++ = 0;
-    RAM+=16;
+    RAM += 16;
   }
-  video_update_core_dmd(bitmap, cliprect, layout);
+  core_dmd_video_update(bitmap, cliprect, layout, NULL);
   return 0;
 }
 
@@ -972,28 +958,24 @@ PINMAME_VIDEO_UPDATE(cc_dmd128x32) {
 /*** 256 X 64 SUPER HUGE DMD ***/
 /*******************************/
 PINMAME_VIDEO_UPDATE(cc_dmd256x64) {
-  int ii, jj, kk;
-  UINT16 *RAM;
-
-  UINT32 offset = locals.visible_page ? 0x800 * locals.visible_page - 0x20 : 0;
-  RAM = ramptr+offset;
-  for (ii = 0; ii <= 64; ii++) {
-    UINT8 *linel = &coreGlobals.dotCol[ii][0];
-    UINT8 *liner = &coreGlobals.dotCol[ii][128];
-    for (kk = 0; kk < 16; kk++) {
+  const UINT16 *RAM = ramptr + 0x800 * locals.visible_page;
+  for (int ii = 0; ii < 64; ii++) {
+    UINT8 *linel = &coreGlobals.dmdDotRaw[ii * layout->length];
+    UINT8 *liner = &coreGlobals.dmdDotRaw[ii * layout->length + 128];
+    for (int kk = 0; kk < 16; kk++) {
       UINT16 intensl = RAM[0];
       UINT16 intensr = RAM[0x10];
-      for(jj=0;jj<8;jj++) {
-         *linel++ = (intensl&0xc000)>>14;
+      for(int jj=0;jj<8;jj++) {
+         *linel++ = (intensl >> 14) & 0x0003;
          intensl <<= 2;
-         *liner++ = (intensr&0xc000)>>14;
+         *liner++ = (intensr >> 14) & 0x0003;
          intensr <<= 2;
       }
-      RAM+=1;
+      RAM += 1;
     }
-    RAM+=16;
+    RAM += 16;
   }
-  video_update_core_dmd(bitmap, cliprect, layout);
+  core_dmd_video_update(bitmap, cliprect, layout, NULL);
   return 0;
 }
 
@@ -1087,7 +1069,7 @@ static WRITE16_HANDLER(lamp_w) {
 
 static WRITE16_HANDLER(col_w) {
   if (!data) {
-    memset(coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+    memset((void*)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
   }
   locals.swCol = data ? 7 - core_BitColToNum(data & 0xff) : -1;
 }

@@ -106,6 +106,20 @@ BY35_ROMEND
 #define input_ports_starsfp input_ports_st
 CORE_CLONEDEFNV(starsfp,stars,"Stars (Free Play)",1978,"Stern",by35_mST100,GAME_USES_CHIMES)
 
+INITGAME(starsb,GEN_STMPU100,dispst6,FLIP_SW(FLIP_L),0,SNDBRD_NONE,0)
+BY17_ROMSTARTx88(starsb, "starsR_v07_U2.716",CRC(896b6950) SHA1(19e84508de644ebcfd941b7ff50abc63f570dfb7),
+                         "starsR_v07_U6.716",CRC(52731d64) SHA1(c007159a9cf0799cd3934b02ec2018d0dc5a39a0))
+BY35_ROMEND
+#define input_ports_starsb input_ports_st
+CORE_CLONEDEFNV(starsb,stars,"Stars (MOD rev. 103)",2024,"Stern / slochar",by35_mST100,GAME_USES_CHIMES)
+
+INITGAME(starsb7,GEN_STMPU100,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_NONE,0)
+BY17_ROMSTARTx88(starsb7,"STARS_72.U2",CRC(83064fe5) SHA1(83d6fdf8f4375bd354c7ae101cebc095ec775da8),
+                         "STARS_72.U6",CRC(a34f4226) SHA1(7d9a5b9f80b41b6d7754d67ec8989105e7815957))
+BY35_ROMEND
+#define input_ports_starsb7 input_ports_st
+CORE_CLONEDEFNV(starsb7,stars,"Stars (MOD rev. 103, 7-digit conversion)",2025,"Stern / slochar",by35_mST100,GAME_USES_CHIMES)
+
 /*--------------------------------
 / Memory Lane
 /-------------------------------*/
@@ -593,8 +607,8 @@ CORE_GAMEDEFNV(ali,"Ali",1980,"Stern",by35_mST200,0)
 INITGAME(alifp,GEN_STMPU200,dispst6,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
 ST200_ROMSTART8888(alifp,"fpali_u1.716",CRC(85888cfa) SHA1(286bce3a2e1cbedc224c10d884f5db8b7ffa2a75),
                          "fpali_u5.716",CRC(52b8e39e) SHA1(267921c2a5636d1f2cc93f0913f005a3e50801a4),
-                         "cpu_u2.716",CRC(9c91d08f) SHA1(a3e8c8e8c2c8b03d86b36eea8c84e5c0a27b8444),
-                         "cpu_u6.716",CRC(7629db56) SHA1(f922d31ec4dd1755da0a24bec4e3fa3a7a9b22fc))
+                         "cpu_u2.716",  CRC(9c91d08f) SHA1(a3e8c8e8c2c8b03d86b36eea8c84e5c0a27b8444),
+                         "cpu_u6.716",  CRC(7629db56) SHA1(f922d31ec4dd1755da0a24bec4e3fa3a7a9b22fc))
 BY35_ROMEND
 #define input_ports_alifp input_ports_st
 CORE_CLONEDEFNV(alifp,ali,"Ali (Free Play)",1980,"Stern",by35_mST200,0)
@@ -607,6 +621,15 @@ ST200_ROMSTART8888(alib,"alif_F76_U1.716",CRC(4fbeee49) SHA1(99617d8e8408ee27283
 BY35_ROMEND
 #define input_ports_alib input_ports_st
 CORE_GAMEDEFNV(alib,"Ali (7-digit conversion Free Play rev. 76)",2023,"Stern / Idleman",by35_mST200,0)
+
+INITGAME(alic,GEN_STMPU200,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(alic,"alif_85_U1.716",CRC(431417f1) SHA1(4be628cee11c454b5e16e10cb407435c376d390f),
+                        "alif_85_U5.716",CRC(7ca78289) SHA1(22dfcfd1dd442b2e46bb697cbf450f10558e4ee5),
+                        "alif_85_U2.716",CRC(10298e80) SHA1(ea66c215d8d880b0e871131053c5225499dccc17),
+                        "alif_85_U6.716",CRC(522f48ec) SHA1(e6a1a042309ef31db57e86db95c1fb01a62da5cf))
+BY35_ROMEND
+#define input_ports_alic input_ports_st
+CORE_GAMEDEFNV(alic,"Ali (7-digit conversion Free Play rev. 85)",2023,"Stern / slochar",by35_mST200,0)
 
 /*--------------------------------
 / Big Game
@@ -664,6 +687,15 @@ ST200_ROMSTART8888(biggamee,"biggame_V12-u1.716",CRC(94efc96f) SHA1(476f1f67b387
 BY35_ROMEND
 #define input_ports_biggamee input_ports_st
 CORE_CLONEDEFNV(biggamee,biggame,"Big Game (MOD rev. 12)",2023,"Stern / Idleman",by35_mST200,0)
+
+INITGAME(biggamef,GEN_STMPU200,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(biggamef,"biggame_13-u1.716", CRC(a05b5a3e) SHA1(dfedcc5faf06ce37c4487ca574c56f3285458a36),
+                            "biggame_V12-u5.716",CRC(44a9a2ba) SHA1(b7ef9b565c90ec71dd8779220203c3b203658904),
+                            "biggame_13-u2.716", CRC(4c321f34) SHA1(923b43a6dcd2e714fbc13aeb28651325885e4220),
+                            "biggame_V12-u6.716",CRC(7a7e67e4) SHA1(7a964db3f92775ea7fc50a90e77fb846fa3f9d9f))
+BY35_ROMEND
+#define input_ports_biggamef input_ports_st
+CORE_CLONEDEFNV(biggamef,biggame,"Big Game (MOD rev. 13)",2024,"Stern / Idleman",by35_mST200,0)
 
 /*--------------------------------
 / Seawitch
@@ -723,6 +755,24 @@ BY35_ROMEND
 #define input_ports_seawitchd input_ports_st
 CORE_CLONEDEFNV(seawitchd,seawitch,"Seawitch (MOD rev. 8)",2021,"Stern / Idleman",by35_mST200,0)
 
+INITGAME(seawitche,GEN_STMPU200,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(seawitche,"seawitch_V09-u1.716",CRC(3f01a1d9) SHA1(12f0f17febe1fad4e570bf82ede821416d79e655),
+                             "seawitch_V09-u5.716",CRC(cc4799ee) SHA1(6f4a3929c821d77ebfd706c614669d28728c2746),
+                             "seawitch_V09-u2.716",CRC(c300fd13) SHA1(8ca456c0b15a344858afb22af9c9152cc212b3fe),
+                             "seawitch_V09-u6.716",CRC(bf9de5c1) SHA1(5d16d4f544d25ffa1b6c20ed0d6acead56301c62))
+BY35_ROMEND
+#define input_ports_seawitche input_ports_st
+CORE_CLONEDEFNV(seawitche,seawitch,"Seawitch (MOD rev. 9)",2023,"Stern / slochar",by35_mST200,0)
+
+INITGAME(seawitchf,GEN_STMPU200,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(seawitchf,"seawitch_V093-u1.716",CRC(a47fe686) SHA1(b65a474e6c6679a336bc71db7cb5a69e0cee5a73),
+                             "seawitch_V093-u5.716",CRC(c5a04e0a) SHA1(67650e32e2871df87354046e5808874100838db6),
+                             "seawitch_V093-u2.716",CRC(9900103e) SHA1(39f35d7bd726a2a90cd75bfa72e14d3eff6ff67f),
+                             "seawitch_V093-u6.716",CRC(a73000e6) SHA1(f050f8083e90552424923d9033376cce9f545b8e))
+BY35_ROMEND
+#define input_ports_seawitchf input_ports_st
+CORE_CLONEDEFNV(seawitchf,seawitch,"Seawitch (MOD rev. 9.3)",2024,"Stern / slochar",by35_mST200,0)
+
 /*--------------------------------
 / Cheetah
 /-------------------------------*/
@@ -780,7 +830,16 @@ ST200_ROMSTART8888(cheetahb2,"b16_mod.u1",       CRC(137a84a0) SHA1(7e6e69eb154a
                              "b16_mod.u6",       CRC(d33e0c2f) SHA1(eccf39c030c217f6cd93e58031d5e8f5525d1b7c))
 BY35_ROMEND
 #define input_ports_cheetahb2 input_ports_st
-CORE_CLONEDEFNV(cheetahb2, cheetah, "Cheetah (Blue cabinet Bonus shot 1/ball)", 2018, "Stern / Idleman", by35_mST200, 0)
+CORE_CLONEDEFNV(cheetahb2,cheetah,"Cheetah (Blue cabinet Bonus shot 1/ball)",2018,"Stern / Idleman",by35_mST200,0)
+
+INITGAME(cheetah84,GEN_STMPU200,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(cheetah84,"cheetah_proto_84_U1.716",CRC(4d544bb3) SHA1(61e10d0d70720762c1ccf9de80e3f4e5eeac2617),
+                             "cheetah_proto_84_U5.716",CRC(73f93a1a) SHA1(dd540bb984bf19432b1951bd7c126bd361409588),
+                             "cheetah_proto_84_U2.716",CRC(428e1615) SHA1(91b27843797b5ef06d0abbc88c6a315de24fff6e),
+                             "cheetah_proto_84_U6.716",CRC(27445ef7) SHA1(042b23812c9f243d5752165c4ae6e19b2acc56a9))
+BY35_ROMEND
+#define input_ports_cheetah84 input_ports_st
+CORE_CLONEDEFNV(cheetah84,cheetah,"Cheetah (Prototype Sounds + MOD 84)",2023,"Stern / slochar",by35_mST200,0)
 
 // https://zacaj.com/p.php?id=65&title=Stern+Cheetah+Tournament+Rom+V1 exists
 
@@ -814,6 +873,15 @@ ST200_ROMSTART8888(quicksib,"QS-V07D_u1.716",CRC(69bbe180) SHA1(e69d8affc98f8993
 BY35_ROMEND
 #define input_ports_quicksib input_ports_st
 CORE_CLONEDEFNV(quicksib,quicksil,"Quicksilver (Free Play & modified rules rev. 07D)",2021,"Stern / Idleman",by35_mST200,0)
+
+INITGAME(quicksic,GEN_STMPU200,dispst7,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(quicksic,"QS-V081_u1.716",CRC(c9e8d14f) SHA1(afe5920f092b227b377a9bccb35db7770c655c32),
+                            "QS-V081_u5.716",CRC(19bbbc0f) SHA1(05428e621ed1b4d85ede2adf66285407f7eed5e2),
+                            "QS-V081_u2.716",CRC(09c36fd0) SHA1(c6d73d185d10a59f7bff29dff1a10ae5746b9c5e),
+                            "QS-V081_u6.716",CRC(21f1fc2e) SHA1(01d6965c91f92b6f39f414ec9ba04e0c0f48d8a2))
+BY35_ROMEND
+#define input_ports_quicksic input_ports_st
+CORE_CLONEDEFNV(quicksic,quicksil,"Quicksilver (Free Play & modified rules rev. 8.1)",2024,"Stern / slochar",by35_mST200,0)
 
 /*--------------------------------
 / Star Gazer
@@ -1035,6 +1103,17 @@ BY35_ROMEND
 #define input_ports_lightnic input_ports_st
 CORE_CLONEDEFNV(lightnic,lightnin,"Lightning (Free Play & MOD rev. 25)",2022,"Stern / Idleman",by35_mST200v,0)
 
+INITGAME(lightnid,GEN_STMPU200,dispLightnin,FLIP_SW(FLIP_L),0,SNDBRD_ST300V,0)
+ST200_ROMSTART8888(lightnid,"light_V27-u1.716",CRC(41ff4fae) SHA1(796bda930e2a010d18491a803b32af8e6acae304),
+                            "light_V27-u5.716",CRC(7b0875cf) SHA1(c91090a7c8e177579b6509ac7537c492aead3f08),
+                            "light_V27-u2.716",CRC(c125f224) SHA1(421c6446ed4af8fc3a771e2d58f11858f6dc1326),
+                            "light_V27-u6.716",CRC(2e8acbcb) SHA1(41f00404268676dadd05dd64cf32c97b35c5fb4c))
+VSU100_SOUNDROM_U9U10(      "snd_u9.716",      CRC(00ffa77c) SHA1(242efd800731a7f84369c6ce54298d0a227dd8ba),
+                            "snd_u10.716",     CRC(80fe9158) SHA1(20fcdb4c09b25e494f02bbfb20c07ff2870d5798))
+BY35_ROMEND
+#define input_ports_lightnid input_ports_st
+CORE_CLONEDEFNV(lightnid,lightnin,"Lightning (Free Play & MOD rev. 27)",2024,"Stern / Idleman",by35_mST200v,0)
+
 /*--------------------------------
 / Split Second
 /-------------------------------*/
@@ -1192,6 +1271,24 @@ ST200_ROMSTART8888(dragfis14,"fisted_VB14-u1.716",CRC(92c3e3d6) SHA1(9b09b9685b3
 BY35_ROMEND
 #define input_ports_dragfis14 input_ports_st
 CORE_CLONEDEFNV(dragfis14,dragfist,"Dragonfist (MOD 14)",2021,"Stern / Idleman",by35_mST200,0)
+
+INITGAME(dragfis15,GEN_STMPU200,dispDragfist,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(dragfis15,"fisted_b02_v15-u1.716",CRC(f4d0499b) SHA1(fe213c9faf1346332cdc4b236140067f443ce1dc),
+                             "fisted_b02_v15-u5.716",CRC(fc02ea95) SHA1(c08afb80110fe35b276fbfc1f8229abecb17b74b),
+                             "fisted_b02_v15-u2.716",CRC(8ef21e97) SHA1(0739bc4bd8eda82765086a2fb7fdbbbe663a03f4),
+                             "fisted_b02_v15-u6.716",CRC(28ead29c) SHA1(2c97363f8a59198727649609cf80ce5cf2631ef6))
+BY35_ROMEND
+#define input_ports_dragfis15 input_ports_st
+CORE_CLONEDEFNV(dragfis15,dragfist,"Dragonfist (MOD 15)",2023,"Stern / slochar",by35_mST200,0)
+
+INITGAME(dragfis16,GEN_STMPU200,dispDragfist,FLIP_SW(FLIP_L),0,SNDBRD_ST300,0)
+ST200_ROMSTART8888(dragfis16,"fisted_VB216-u1.716",CRC(ca30b6ee) SHA1(b056e4661210546ac316eef952525b8500ce6993),
+                             "fisted_VB216-u5.716",CRC(b65e49c3) SHA1(1a71cd13f0c8c8898fc09c0582969643c0290979),
+                             "fisted_VB216-u2.716",CRC(3b1510ef) SHA1(b2785e9a743a3062e5bc56096c6e81f1a26e59a0),
+                             "fisted_VB216-u6.716",CRC(b5f95a47) SHA1(6407c36dd598671321ef2c5661af13ad31c8f15c))
+BY35_ROMEND
+#define input_ports_dragfis16 input_ports_st
+CORE_CLONEDEFNV(dragfis16,dragfist,"Dragonfist (MOD 16)",2024,"Stern / slochar",by35_mST200,0)
 
 /*--------------------------------
 / Dragonfist (bootleg - modified to match instruction card/manual)

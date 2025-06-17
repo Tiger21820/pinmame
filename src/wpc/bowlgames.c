@@ -403,6 +403,19 @@ ROM_START(larana)
 ROM_END
 CORE_GAMEDEFNV(larana,"La Rana",1990,"Inder (Spain)",INDERS1RANA,0)
 
+// This set gives, by default, 2 launches per coin. Other changes are unknown.
+#define init_larana2 init_larana
+#define input_ports_larana2 input_ports_larana
+ROM_START(larana2)
+  NORMALREGION(0x10000, INDER_MEMREG_CPU)
+    ROM_LOAD("larana_alt.bin",    0x0000,0x2000, CRC(81a6c8c3) SHA1(e3678e18704d0be0a1e9ece178babec7d728e510))
+  NORMALREGION(0x10000, INDER_MEMREG_SND)
+    ROM_LOAD("sound_a_050690.bin",0x0000,0x2000, CRC(1513fd92) SHA1(6ca0723f5d7c86b844476a4830c8fc3744cbf918))
+  NORMALREGION(0x40000, REGION_USER1)
+    ROM_LOAD("sound_b_200690.bin",0x0000,0x10000,CRC(3aaa7c7d) SHA1(4a8531b6859fc1f2a4bb63a51da35e9081b7e88b))
+ROM_END
+CORE_CLONEDEFNV(larana2,larana,"La Rana (alternate set)",1990,"Inder (Spain)",INDERS1RANA,0)
+
 /*-------------------------------------------------------------------
 / Gun Shot
 --------------------------------------------------------------------*/
@@ -615,8 +628,8 @@ CORE_CLONEDEF(afv,d4,l4,"Addams Family Values (Coin Dropper) (D-4 LED Ghost Fix)
 / Strikes N' Spares (#N111)
 /-------------------------------------------------------------------*/
 static struct core_dispLayout GTS3_dispDMD[] = {
-  {0,0,32,128,CORE_DMD|CORE_DMDNOAA,(genf *)gts3_dmd128x32},
-  {34,0,32,128,CORE_DMD|CORE_DMDNOAA,(genf *)gts3_dmd128x32a},
+  {0,0,32,128,CORE_DMD|CORE_DMDNOAA,(genf *)gts3_dmd128x32a},
+  {34,0,32,128,CORE_DMD|CORE_DMDNOAA,(genf *)gts3_dmd128x32b},
   {0}
 };
 static core_tGameData snsparesGameData = {GEN_GTS3,GTS3_dispDMD,{FLIP_SWNO(21,22),4,4,0,SNDBRD_NONE,0}};

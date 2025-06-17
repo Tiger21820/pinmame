@@ -14,6 +14,20 @@
 // Generated from the TEXTINCLUDE 2 resource.
 //
 #define NOWINRES
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#if _MSC_VER >= 1800
+ // Windows 2000 _WIN32_WINNT_WIN2K
+ #define _WIN32_WINNT 0x0500
+#elif _MSC_VER < 1600
+ #define _WIN32_WINNT 0x0400
+#else
+ #define _WIN32_WINNT 0x0403
+#endif
+#define WINVER _WIN32_WINNT
+#endif
 #include "windows.h"
 #include "commctrl.h"
 
@@ -257,7 +271,7 @@ BEGIN
             VALUE "FileDescription", "Multiple Pinball Machine Emulator for Win32"
             VALUE "FileVersion", PM_VERSION_STRING_COMMAS
             VALUE "InternalName", "PinMAME32"
-            VALUE "LegalCopyright", "Copyright 2001-2024 by the PinMAME team"
+            VALUE "LegalCopyright", "Copyright 2001-2025 by the PinMAME team"
             VALUE "OriginalFilename", "PinMAME32.exe"
             VALUE "ProductName", "PinMAME32"
             VALUE "ProductVersion", PM_VERSION_STRING_POINTS_FULL
@@ -319,7 +333,7 @@ BEGIN
     CTEXT           "Multiple Pinball Machine Emulator",IDC_STATIC,147,7,142,
                     11,NOT WS_GROUP
     CTEXT           "Version 0",IDC_VERSION,147,18,142,11,NOT WS_GROUP
-    CTEXT           "Copyright (C) 2001-2024 PinMAME Team",IDC_STATIC,147,29,
+    CTEXT           "Copyright (C) 2001-2025 PinMAME Team",IDC_STATIC,147,29,
                     142,10,NOT WS_GROUP
     CTEXT           "PinMAME32 version by Martin Adrian",IDC_STATIC,147,51,
                     142,10,NOT WS_GROUP

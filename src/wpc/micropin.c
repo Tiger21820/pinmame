@@ -29,8 +29,11 @@ static struct {
   mame_timer *resetTimer;
 
   double volume;
-  UINT8  irq, inhibitIrq;
-  UINT8  out[16];
+  UINT8  irq;
+
+  UINT8 lastSw5, retVal, laneMade;
+  UINT8 swStatus[32];
+  UINT8 swMade[16];
 } locals;
 
 
@@ -360,51 +363,36 @@ CORE_GAMEDEFNV(pentacup,"Pentacup (rev. 1)",1978,"Micropin",pentacup,0)
 /* 1980 Version */
 
 static INTERRUPT_GEN(mp2_vblank) {
-  int i;
-  for (i = 0; i < 32; i++) {
-    UINT8 mem = memory_region(REGION_CPU1)[0x23c0 + i];
-    coreGlobals.segments[62 - i * 2].w = core_bcd2seg7[mem >> 4];
-    coreGlobals.segments[63 - i * 2].w = core_bcd2seg7[mem & 0x0f];
-  }
-  coreGlobals.lampMatrix[16] = (memory_region(REGION_CPU1)[0x23d6] & 0xf0) | (memory_region(REGION_CPU1)[0x23de] >> 4);
-  coreGlobals.lampMatrix[17] = (memory_region(REGION_CPU1)[0x23cc] & 0xf0) | (memory_region(REGION_CPU1)[0x23de] & 0x0f);
+  coreGlobals.diagnosticLed = memory_region(REGION_CPU1)[0x2247] >> 7;
+  cpu_set_irq_line(0, IRQ_LINE_NMI, core_getSw(-7) ? ASSERT_LINE : CLEAR_LINE);
 
   core_updateSw(TRUE);
 }
 
 static INTERRUPT_GEN(mp2_irq) {
-  if (!locals.inhibitIrq) {
+  int i;
+  if (!coreGlobals.swMatrix[0] && !coreGlobals.swMatrix[1] && !coreGlobals.swMatrix[2] && !coreGlobals.swMatrix[3]) { // don't call RST55 as long as any contact is made!
     cpu_set_irq_line(0, I8085_RST55_LINE, locals.irq ? ASSERT_LINE : CLEAR_LINE);
-    cpu_set_irq_line(0, I8085_RST65_LINE, !locals.irq ? ASSERT_LINE : CLEAR_LINE);
-    locals.irq = !locals.irq;
   }
+  cpu_set_irq_line(0, I8085_RST65_LINE, !locals.irq ? ASSERT_LINE : CLEAR_LINE);
+  locals.irq = !locals.irq;
 
-  if (coreGlobals.swMatrix[6] & 0x08) { // bonus collect must be set here???
-    memory_region(REGION_CPU1)[0x21ae] |= 1;
+  for (i = 0; i < 16; i++) {
+    if (!locals.swMade[i] && core_getSw(49 + i)) {
+      locals.swMade[i] = 1;
+      memory_region(REGION_CPU1)[0x21a0 + i] |= 1;
+    } else if (locals.swMade[i] && !core_getSw(49 + i)) {
+      locals.swMade[i] = 0;
+      memory_region(REGION_CPU1)[0x21a0 + i] = 0;
+    }
   }
 }
 
 static SWITCH_UPDATE(MICROPIN2) {
-  int i, sw, offset;
-
   if (inports) {
-    CORE_SETKEYSW(inports[CORE_COREINPORT] >> 8, 0x40, 1);
+    CORE_SETKEYSW(inports[CORE_COREINPORT] >> 8, 0xcc, 5);
     CORE_SETKEYSW(inports[CORE_COREINPORT], 0x01, 0);
-    CORE_SETKEYSW(inports[CORE_COREINPORT], 0xf0, 9);
-  }
-  cpu_set_irq_line(0, IRQ_LINE_NMI, (coreGlobals.swMatrix[0] & 1) ? ASSERT_LINE : CLEAR_LINE);
-
-  for (sw = 0; sw < 4; sw++) {
-    for (i = 0; i < 8; i++) {
-      offset = 0x2193 + sw * 8 + i;
-      if (offset < 0x21ae) { // exclude bonus collect and all beyond
-        if (coreGlobals.swMatrix[3 + sw] & (1 << i)) {
-          memory_region(REGION_CPU1)[offset] |= 1;
-        } else {
-          memory_region(REGION_CPU1)[offset] &= 0xfe;
-        }
-      }
-    }
+    CORE_SETKEYSW(inports[CORE_COREINPORT], 0x70, 9);
   }
 }
 
@@ -412,8 +400,25 @@ static WRITE_HANDLER(mxxxx_w) {
   logerror("%04x: Write to %04x: %02x\n", activecpu_get_pc(), offset, data);
 }
 
+static WRITE_HANDLER(disp_w) {
+  coreGlobals.segments[62 - offset * 2].w = core_bcd2seg7a[data >> 4];
+  coreGlobals.segments[63 - offset * 2].w = core_bcd2seg7a[data & 0x0f];
+  if (coreGlobals.segments[5].w) coreGlobals.segments[5].w |= 0x80;
+  if (offset == 0x16) {
+    coreGlobals.lampMatrix[8] = (coreGlobals.lampMatrix[8] & 0x0f) | (data & 0xf0);
+  }
+  if (offset == 0x0c) {
+    coreGlobals.lampMatrix[9] = (coreGlobals.lampMatrix[9] & 0x0f) | (data & 0xf0);
+  }
+  if (offset == 0x1e) {
+    coreGlobals.lampMatrix[8] = (coreGlobals.lampMatrix[8] & 0xf0) | (data >> 4);
+    coreGlobals.lampMatrix[9] = (coreGlobals.lampMatrix[9] & 0xf0) | (data & 0x0f);
+  }
+}
+
 static MEMORY_WRITE_START(mp2_writemem)
   { 0x0000, 0x1fff, mxxxx_w },
+  { 0x23c0, 0x23df, disp_w },
   { 0x2000, 0x23ff, MWA_RAM, &generic_nvram, &generic_nvram_size },
 MEMORY_END
 
@@ -427,57 +432,102 @@ static void control_sound(int enable) {
     discrete_sound_w(1, 0);
     discrete_sound_w(2, 0);
   }
-  locals.inhibitIrq = 0;
 }
 
 static WRITE_HANDLER(mp2_out) {
-  if (offset == 9) { // tone enable and duration
-    if ((data ^ 0xff) > 1) {
-      discrete_sound_w(2, 1);
-      locals.inhibitIrq = 1;
-      timer_adjust(locals.sndTimer, TIME_IN_MSEC(5 * (data ^ 0xff)), 0, TIME_NEVER);
-    } else {
-      control_sound(data & 1);
-    }
-    return;
-  } else if (offset == 0x0a) { // tone pitch
-    // if HSTD is beaten, the game will play "Call to the Post", use it to fine-tune. :)
-    discrete_sound_w(1, 100 * (data ^ 0xff) / 220 - 8);
-    return;
+  switch (offset) {
+    case 0: case 1: case 2: case 3: case 4:
+      coreGlobals.lampMatrix[offset] = ~data;
+      break;
+    case 5:
+      coreGlobals.solenoids = (coreGlobals.solenoids & 0xffffff00) | (data ^ 0xff);
+      break;
+    case 6:
+      coreGlobals.solenoids = (coreGlobals.solenoids & 0xffff00ff) | ((data ^ 0xff) << 8);
+      break;
+    case 7:
+      coreGlobals.solenoids = (coreGlobals.solenoids & 0xff00ffff) | ((data ^ 0xff) << 16);
+      break;
+    case 8:
+      coreGlobals.solenoids = (coreGlobals.solenoids & 0x00ffffff) | ((data ^ 0xff) << 24);
+      break;
+    case 9: // tone enable and duration
+      if ((data ^ 0xff) > 1) {
+        discrete_sound_w(2, 1);
+        timer_adjust(locals.sndTimer, TIME_IN_MSEC(5 + 10 * (data ^ 0xff)), 0, TIME_NEVER);
+      } else {
+        control_sound(data & 1);
+      }
+      break;
+    case 0x0a: // tone pitch
+      // if HSTD is beaten, the game will play "Call to the Post", use it to fine-tune. :)
+      discrete_sound_w(1, 150 * (data ^ 0xff) / 220 - 8);
+      break;
+    case 0x0d: case 0x0e: case 0x0f:
+      coreGlobals.lampMatrix[offset - 8] = ~data;
+      break;
+    default:
+      logerror("out %x: %02x\n", offset, data);
   }
-
-  coreGlobals.lampMatrix[offset] = ~data;
-  if (locals.out[offset] != data) logerror("out %x: %02x\n", offset, data);
-  locals.out[offset] = data;
 #ifdef MAME_DEBUG
   if (offset == 0x0d) {
-    coreGlobals.segments[64].w = core_bcd2seg7[data ^ 0xff];
+    coreGlobals.segments[64].w = core_bcd2seg7a[data ^ 0xff];
   }
   if (offset == 0x0e) {
-    coreGlobals.segments[65].w = core_bcd2seg7[data ^ 0xff];
+    coreGlobals.segments[65].w = core_bcd2seg7a[data ^ 0xff];
   }
   if (offset == 0x0f) {
-    coreGlobals.segments[66].w = core_bcd2seg7[data >> 4];
-    coreGlobals.segments[67].w = core_bcd2seg7[data & 0x0f];
+    coreGlobals.segments[66].w = core_bcd2seg7a[data >> 4];
+    coreGlobals.segments[67].w = core_bcd2seg7a[data & 0x0f];
   }
 #endif
 }
 
 static READ_HANDLER(mp2_sw) {
-  if (coreGlobals.swMatrix[1 + offset])
-    return coreGlobals.swMatrix[1 + offset];
-  return 0x01;
+  if (!offset) {
+    int i;
+    locals.retVal = locals.retVal == 0x01 ? 0x02 : 0x01;
+    if (!locals.swStatus[24] && core_getSw(25)) { // the outhole works like a flip-flop!
+      memory_region(REGION_CPU1)[0x23e0 + 24] ^= 0x80;
+    }
+    for (i = 0; i < 32; i++) {
+      if (i != 24) {
+        memory_region(REGION_CPU1)[0x23e0 + i] = core_getSw(1 + i) ? 0x80 : 0; // most switches are read using DMA
+      }
+      if (locals.laneMade > 4 && (i == 0 || i == 15 || i == 31)) { // lanes may only be triggered shortly
+        memory_region(REGION_CPU1)[0x23e0 + i] = 0;
+      }
+      if (core_getSw(1 + i)) {
+        if (i == 0 || i == 15 || i == 31) { // lanes block scoring for other lanes
+          if (locals.laneMade < 5) {
+            locals.laneMade++;
+          }
+        } else {
+          locals.laneMade = 0;
+        }
+      }
+      locals.swStatus[i] = core_getSw(1 + i);
+    }
+    if (locals.lastSw5 != coreGlobals.swMatrix[5]) {
+      locals.retVal = locals.lastSw5 = coreGlobals.swMatrix[5];
+    }
+    return locals.retVal;
+  }
+  if (coreGlobals.swMatrix[6]) {
+    locals.laneMade = 0;
+  }
+  return coreGlobals.swMatrix[6];
 }
 
 static READ_HANDLER(mp2_dip) {
   switch(offset + 2) {
-    case 2: // 0..7 cents, unknown switch
-      return ~(core_getDip(4) | (coreGlobals.swMatrix[9] & 1));
-    case 3: // 00..70 cents, unknown diagnostic switch
-      return ~(core_getDip(2) | (coreGlobals.swMatrix[10] & 1));
-    case 4: // 8+9 cents, 80+90 cents, coin, show previous, NVRAM protect, unknown switch
-      return ~((core_getDip(5) & 0x03) | (core_getDip(3) & 0x0c) | (~coreGlobals.swMatrix[9] & 0xf0));
-    default: // dips, 1+2 set balls per game
+    case 2: // 0..7 cents
+      return ~core_getDip(4);
+    case 3: // 00..70 cents
+      return ~core_getDip(2);
+    case 4: // 8+9 cents, 80+90 cents, coin, launch ball, show last score, endless tilt
+      return ~((core_getDip(5) & 0x03) | ((core_getDip(3) & 0x03) << 2) | (~coreGlobals.swMatrix[9] & 0xf0)) | (core_getDip(1) << 7); 
+    default: // real dips
       return ~core_getDip(0);
   }
 }
@@ -503,8 +553,8 @@ static DISCRETE_SOUND_START(mp2_discInt)
   DISCRETE_INPUT(NODE_01,1,0x0003,0) // tone
   DISCRETE_INPUT(NODE_02,2,0x0003,0) // enable
   DISCRETE_MULTADD(NODE_03,1,NODE_01,10,200)
-  DISCRETE_TRIANGLEWAVE(NODE_04,NODE_02,NODE_03,20000,10000,0)
-  DISCRETE_GAIN(NODE_05,NODE_04,12)
+  DISCRETE_SQUAREWAVE(NODE_04,NODE_02,NODE_03,2,50,0,0)
+  DISCRETE_GAIN(NODE_05,NODE_04,7500)
   DISCRETE_OUTPUT(NODE_05,50)
 DISCRETE_SOUND_END
 
@@ -514,7 +564,7 @@ MACHINE_DRIVER_START(pentacp2)
   MDRV_CPU_ADD_TAG("mcpu", 8085A, 1500000) // probably 3 MHz clock, internal /2 divider
   MDRV_CPU_MEMORY(mp2_readmem, mp2_writemem)
   MDRV_CPU_PORTS(mp2_readport, mp2_writeport)
-  MDRV_CPU_PERIODIC_INT(mp2_irq, 250)
+  MDRV_CPU_PERIODIC_INT(mp2_irq, 227*2) // timer @$219f runs in sync with this value
   MDRV_CPU_VBLANK_INT(mp2_vblank, 1)
   MDRV_SWITCH_UPDATE(MICROPIN2)
   MDRV_DIPS(48)
@@ -527,19 +577,17 @@ INPUT_PORTS_START(pentacp2)
   CORE_PORTS
   SIM_PORTS(1)
   PORT_START /* 0 */
-    COREPORT_BIT   (0x0010, "Coin",          KEYCODE_5)
-    COREPORT_BIT   (0x4000, "Start",         KEYCODE_1)
-    COREPORT_BIT   (0x0080, "Tilt",          KEYCODE_DEL)
-    COREPORT_BIT   (0x0040, "Show previous", KEYCODE_9)
-    COREPORT_BIT   (0x0020, "Clear NVRAM",   KEYCODE_0)
-    COREPORT_BIT   (0x0001, "Reset",         KEYCODE_HOME)
+    COREPORT_BIT   (0x0010, "Add Credit",        KEYCODE_5)
+    COREPORT_BIT   (0x4000, "Enter Players",     KEYCODE_1)
+    COREPORT_BIT   (0x0020, "Launch Ball",       KEYCODE_ENTER)
+    COREPORT_BIT   (0x0040, "Show Last Score",   KEYCODE_END)
+    COREPORT_BIT   (0x8800, "Tilt",              KEYCODE_DEL)
+    COREPORT_BIT   (0x0001, "Reset",             KEYCODE_HOME)
   PORT_START /* 1 */
-    COREPORT_DIPNAME( 0x0001, 0x0000, "S1")
-      COREPORT_DIPSET(0x0000, "0" )
-      COREPORT_DIPSET(0x0001, "1" )
-    COREPORT_DIPNAME( 0x0002, 0x0000, "S2")
-      COREPORT_DIPSET(0x0000, "0" )
-      COREPORT_DIPSET(0x0002, "1" )
+    COREPORT_DIPNAME( 0x0003, 0x0000, "Balls / Game")
+      COREPORT_DIPSET(0x0000, "3" )
+      COREPORT_DIPSET(0x0001, "4" )
+      COREPORT_DIPSET(0x0003, "5" )
     COREPORT_DIPNAME( 0x0004, 0x0000, "S3")
       COREPORT_DIPSET(0x0000, "0" )
       COREPORT_DIPSET(0x0004, "1" )
@@ -558,9 +606,12 @@ INPUT_PORTS_START(pentacp2)
     COREPORT_DIPNAME( 0x0080, 0x0000, "S8")
       COREPORT_DIPSET(0x0000, "0" )
       COREPORT_DIPSET(0x0080, "1" )
+    COREPORT_DIPNAME( 0x0100, 0x0000, "Endless Tilt")
+      COREPORT_DIPSET(0x0000, DEF_STR(Off))
+      COREPORT_DIPSET(0x0100, DEF_STR(On))
   PORT_START /* 2 */
     COREPORT_DIPNAME( 0xffff, 0x0004, "10 cents x")
-      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0001, "0" )
       COREPORT_DIPSET(0x0002, "1" )
       COREPORT_DIPSET(0x0004, "2" )
       COREPORT_DIPSET(0x0008, "3" )
@@ -568,11 +619,11 @@ INPUT_PORTS_START(pentacp2)
       COREPORT_DIPSET(0x0020, "5" )
       COREPORT_DIPSET(0x0040, "6" )
       COREPORT_DIPSET(0x0080, "7" )
-      COREPORT_DIPSET(0x0400, "8" )
-      COREPORT_DIPSET(0x0800, "9" )
+      COREPORT_DIPSET(0x0100, "8" )
+      COREPORT_DIPSET(0x0200, "9" )
   PORT_START /* 3 */
     COREPORT_DIPNAME( 0xffff, 0x0020, " 1 cent  x")
-      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0001, "0" )
       COREPORT_DIPSET(0x0002, "1" )
       COREPORT_DIPSET(0x0004, "2" )
       COREPORT_DIPSET(0x0008, "3" )
@@ -585,18 +636,20 @@ INPUT_PORTS_START(pentacp2)
 INPUT_PORTS_END
 
 core_tLCDLayout mp2_disp[] = {
-  { 0, 6,58,3,CORE_SEG7}, { 0,13,61,3,CORE_SEG7}, { 0,27,12,3,CORE_SEG7}, { 0,34,15,3,CORE_SEG7},
-  { 3, 0, 0,2,CORE_SEG7}, { 3, 7,10,2,CORE_SEG7}, { 3,14, 9,1,CORE_SEG7},
-  { 3,19,46,3,CORE_SEG7}, { 3,26,49,3,CORE_SEG7}, { 3,35,32,3,CORE_SEG7}, { 3,42,35,3,CORE_SEG7},
-  { 6,19,52,3,CORE_SEG7}, { 6,26,55,3,CORE_SEG7}, { 6,35,26,3,CORE_SEG7}, { 6,42,29,3,CORE_SEG7},
-  { 9,16, 4,1,CORE_SEG7}, { 9,19, 5,3,CORE_SEG7}, { 9,35,20,3,CORE_SEG7}, { 9,42,23,3,CORE_SEG7},
+  { 0, 6,58,3,CORE_SEG7}, { 0,13,61,3,CORE_SEG7}, { 0,29,12,3,CORE_SEG7}, { 0,36,15,3,CORE_SEG7},
+  { 4, 0, 0,2,CORE_SEG7}, { 4, 7,10,2,CORE_SEG7}, { 4,14, 9,1,CORE_SEG7},
+  { 4,20,46,3,CORE_SEG7}, { 4,27,49,3,CORE_SEG7}, { 4,38,32,3,CORE_SEG7}, { 4,45,35,3,CORE_SEG7},
+  { 7,20,52,3,CORE_SEG7}, { 7,27,55,3,CORE_SEG7}, { 7,38,26,3,CORE_SEG7}, { 7,45,29,3,CORE_SEG7},
+  {10,17,39,1,CORE_SEG7}, {10,20,40,3,CORE_SEG7}, {10,38,20,3,CORE_SEG7}, {10,45,23,3,CORE_SEG7},
+  {10, 0, 4,1,CORE_SEG7}, {10, 2, 5,1,CORE_SEG8D},{10, 4, 6,2,CORE_SEG7},
 #ifdef MAME_DEBUG
-  {12,14,39,7,CORE_SEG7}, {12,28,19,1,CORE_SEG7}, {12,30, 8,1,CORE_SEG7},
-  {12, 0,64,1,CORE_SEG7}, {12, 4,65,1,CORE_SEG7}, {12, 8,66,2,CORE_SEG7},
+  {10,27,43,3,CORE_SEG7}, {10,35,19,1,CORE_SEG7},
+  {13,14, 8,1,CORE_SEG7},
+  {13, 0,64,1,CORE_SEG7}, {13, 4,65,1,CORE_SEG7}, {13, 8,66,2,CORE_SEG7},
 #endif
   {0}
 };
-static core_tGameData pentacup2GameData = {0,mp2_disp,{FLIP_SWNO(73,65),0,10},NULL,{"",{0,0,0,0x01}}};
+static core_tGameData pentacup2GameData = {0,mp2_disp,{FLIP_SWNO(38,37),0,2}};
 static void init_pentacp2(void) {
   core_gameData = &pentacup2GameData;
 }
@@ -608,4 +661,186 @@ ROM_START(pentacp2)
   ROM_LOAD("micro_3.bin", 0x1000, 0x0800, CRC(9d5d04d1) SHA1(1af32c418b73ee457f06ee9a8362cfec75e61f30))
   ROM_LOAD("micro_4.bin", 0x1800, 0x0800, CRC(358ffd6a) SHA1(f5299e39d991bf882f827a62a1d9bb18e46dbcfc))
 ROM_END
-CORE_GAMEDEFNV(pentacp2,"Pentacup (rev. 2)",1980,"Micropin",pentacp2,GAME_NOT_WORKING)
+CORE_GAMEDEFNV(pentacp2,"Pentacup (rev. 2)",1981,"Micropin",pentacp2,0)
+
+INPUT_PORTS_START(pentacpt)
+  CORE_PORTS
+  SIM_PORTS(1)
+  PORT_START /* 0 */
+    COREPORT_BIT   (0x0400, "Add Credit",        KEYCODE_5)
+    COREPORT_BIT   (0x4000, "Enter Players",     KEYCODE_1)
+    COREPORT_BIT   (0x0020, "Launch Ball",       KEYCODE_ENTER)
+    COREPORT_BIT   (0x8800, "Tilt",              KEYCODE_DEL)
+    COREPORT_BIT   (0x0001, "Reset",             KEYCODE_HOME)
+  PORT_START /* 1 */
+    COREPORT_DIPNAME( 0x0003, 0x0000, "Balls / Game")
+      COREPORT_DIPSET(0x0000, "3" )
+      COREPORT_DIPSET(0x0001, "4" )
+      COREPORT_DIPSET(0x0003, "5" )
+    COREPORT_DIPNAME( 0x0004, 0x0004, "Show highest scores")
+      COREPORT_DIPSET(0x0000, DEF_STR(Off))
+      COREPORT_DIPSET(0x0004, DEF_STR(On))
+    COREPORT_DIPNAME( 0x0008, 0x0000, "S4")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0008, "1" )
+    COREPORT_DIPNAME( 0x0010, 0x0000, "S5")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0010, "1" )
+    COREPORT_DIPNAME( 0x0020, 0x0000, "S6")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0020, "1" )
+    COREPORT_DIPNAME( 0x0040, 0x0000, "S7")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0040, "1" )
+    COREPORT_DIPNAME( 0x0080, 0x0000, "Credits / Token")
+      COREPORT_DIPSET(0x0000, "1" )
+      COREPORT_DIPSET(0x0080, "4" )
+    // pentacpt machines seem to hold bit 7 of port 4 high
+    COREPORT_DIPNAME( 0x0100, 0x0100, "Endless Tilt")
+      COREPORT_DIPSET(0x0000, DEF_STR(Off))
+      COREPORT_DIPSET(0x0100, DEF_STR(On))
+  PORT_START /* 2 */
+    COREPORT_DIPNAME( 0xffff, 0x0004, "10 cents x")
+      COREPORT_DIPSET(0x0001, "0" )
+      COREPORT_DIPSET(0x0002, "1" )
+      COREPORT_DIPSET(0x0004, "2" )
+      COREPORT_DIPSET(0x0008, "3" )
+      COREPORT_DIPSET(0x0010, "4" )
+      COREPORT_DIPSET(0x0020, "5" )
+      COREPORT_DIPSET(0x0040, "6" )
+      COREPORT_DIPSET(0x0080, "7" )
+      COREPORT_DIPSET(0x0100, "8" )
+      COREPORT_DIPSET(0x0200, "9" )
+  PORT_START /* 3 */
+    COREPORT_DIPNAME( 0xffff, 0x0020, " 1 cent  x")
+      COREPORT_DIPSET(0x0001, "0" )
+      COREPORT_DIPSET(0x0002, "1" )
+      COREPORT_DIPSET(0x0004, "2" )
+      COREPORT_DIPSET(0x0008, "3" )
+      COREPORT_DIPSET(0x0010, "4" )
+      COREPORT_DIPSET(0x0020, "5" )
+      COREPORT_DIPSET(0x0040, "6" )
+      COREPORT_DIPSET(0x0080, "7" )
+      COREPORT_DIPSET(0x0100, "8" )
+      COREPORT_DIPSET(0x0200, "9" )
+INPUT_PORTS_END
+
+core_tLCDLayout mpt_disp[] = {
+  { 0, 6,58,3,CORE_SEG7}, { 0,13,61,3,CORE_SEG7}, { 0,29,12,3,CORE_SEG7}, { 0,36,15,3,CORE_SEG7},
+  { 4, 0, 0,2,CORE_SEG7}, { 4, 7,10,2,CORE_SEG7}, { 4,14, 9,1,CORE_SEG7},
+  { 4,20,46,3,CORE_SEG7}, { 4,27,49,3,CORE_SEG7}, { 4,38,32,3,CORE_SEG7}, { 4,45,35,3,CORE_SEG7},
+  { 7,20,52,3,CORE_SEG7}, { 7,27,55,3,CORE_SEG7}, { 7,38,26,3,CORE_SEG7}, { 7,45,29,3,CORE_SEG7},
+  {10,17,39,1,CORE_SEG7}, {10,20,40,3,CORE_SEG7}, {10,27,43,3,CORE_SEG7}, {10,35,19,1,CORE_SEG7}, {10,38,20,3,CORE_SEG7}, {10,45,23,3,CORE_SEG7},
+  {10, 0, 4,1,CORE_SEG7}, {10, 2, 5,1,CORE_SEG8D},{10, 4, 6,2,CORE_SEG7},
+#ifdef MAME_DEBUG
+  {13,14, 8,1,CORE_SEG7},
+  {13, 0,64,1,CORE_SEG7}, {13, 4,65,1,CORE_SEG7}, {13, 8,66,2,CORE_SEG7},
+#endif
+  {0}
+};
+static core_tGameData pentacuptGameData = {0,mpt_disp,{FLIP_SWNO(38,37),0,2}};
+static void init_pentacpt(void) {
+  core_gameData = &pentacuptGameData;
+}
+
+// The Rev T game has some drastic differences from the 1981 release version
+// shown at https://www.ipdb.org/machine.cgi?id=3822
+
+// See the game's display panel for comparison.
+// Also:
+// - No HSTD feature, but remembers the top two scores without giving replays for beating them
+// - Panels for team scores with an extra million digit
+// - Some input contacts were moved to different places
+// - DIP switch #8 will toggle between 1 and 4 games added per push of the credits button
+
+// The ROM labels just say "[1-4] REV. T" so I named the ROMs similar to the existing set but with a T each.
+
+ROM_START(pentacpt)
+  NORMALREGION(0x10000, REGION_CPU1)
+  ROM_LOAD("microt_1.bin", 0x0000, 0x0800, CRC(690646eb) SHA1(86253b61ac9554ee5bdcdf9c0a2302fc393b9ada))
+  ROM_LOAD("microt_2.bin", 0x0800, 0x0800, CRC(51d09098) SHA1(4efe3a05ad60f0fc52aa5402e660f34b99855b59))
+  ROM_LOAD("microt_3.bin", 0x1000, 0x0800, CRC(cefb0966) SHA1(836491745417fc0d5f88c01a9c69a5c322d194be))
+  ROM_LOAD("microt_4.bin", 0x1800, 0x0800, CRC(6f691929) SHA1(a18352312706e0f0af14a33fac31c3f5f7156ba8))
+ROM_END
+CORE_CLONEDEFNV(pentacpt,pentacp2,"Pentacup (rev. T)",1980,"Micropin",pentacp2,0)
+
+INPUT_PORTS_START(pentacps)
+  CORE_PORTS
+  SIM_PORTS(1)
+  PORT_START /* 0 */
+    COREPORT_BIT   (0x0400, "Add Credit",        KEYCODE_5)
+    COREPORT_BIT   (0x4000, "Enter Players",     KEYCODE_1)
+    COREPORT_BIT   (0x0020, "Launch Ball",       KEYCODE_ENTER)
+    COREPORT_BIT   (0x8800, "Tilt",              KEYCODE_DEL)
+    COREPORT_BIT   (0x0001, "Reset",             KEYCODE_HOME)
+  PORT_START /* 1 */
+    COREPORT_DIPNAME( 0x0003, 0x0000, "Balls / Game")
+      COREPORT_DIPSET(0x0000, "3" )
+      COREPORT_DIPSET(0x0001, "4" )
+      COREPORT_DIPSET(0x0003, "5" )
+    COREPORT_DIPNAME( 0x0004, 0x0004, "Show highest scores")
+      COREPORT_DIPSET(0x0000, DEF_STR(Off))
+      COREPORT_DIPSET(0x0004, DEF_STR(On))
+    COREPORT_DIPNAME( 0x0008, 0x0000, "S4")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0008, "1" )
+    COREPORT_DIPNAME( 0x0010, 0x0000, "S5")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0010, "1" )
+    COREPORT_DIPNAME( 0x0020, 0x0000, "S6")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0020, "1" )
+    COREPORT_DIPNAME( 0x0040, 0x0000, "S7")
+      COREPORT_DIPSET(0x0000, "0" )
+      COREPORT_DIPSET(0x0040, "1" )
+    COREPORT_DIPNAME( 0x0080, 0x0000, "Credits / Token")
+      COREPORT_DIPSET(0x0000, "1" )
+      COREPORT_DIPSET(0x0080, "4" )
+    // pentacps machines seem to hold bit 7 of port 4 high
+    COREPORT_DIPNAME( 0x0100, 0x0100, "Endless Tilt")
+      COREPORT_DIPSET(0x0000, DEF_STR(Off))
+      COREPORT_DIPSET(0x0100, DEF_STR(On))
+  PORT_START /* 2 */
+    COREPORT_DIPNAME( 0xffff, 0x0004, "10 cents x")
+      COREPORT_DIPSET(0x0001, "0" )
+      COREPORT_DIPSET(0x0002, "1" )
+      COREPORT_DIPSET(0x0004, "2" )
+      COREPORT_DIPSET(0x0008, "3" )
+      COREPORT_DIPSET(0x0010, "4" )
+      COREPORT_DIPSET(0x0020, "5" )
+      COREPORT_DIPSET(0x0040, "6" )
+      COREPORT_DIPSET(0x0080, "7" )
+      COREPORT_DIPSET(0x0100, "8" )
+      COREPORT_DIPSET(0x0200, "9" )
+  PORT_START /* 3 */
+    COREPORT_DIPNAME( 0xffff, 0x0020, " 1 cent  x")
+      COREPORT_DIPSET(0x0001, "0" )
+      COREPORT_DIPSET(0x0002, "1" )
+      COREPORT_DIPSET(0x0004, "2" )
+      COREPORT_DIPSET(0x0008, "3" )
+      COREPORT_DIPSET(0x0010, "4" )
+      COREPORT_DIPSET(0x0020, "5" )
+      COREPORT_DIPSET(0x0040, "6" )
+      COREPORT_DIPSET(0x0080, "7" )
+      COREPORT_DIPSET(0x0100, "8" )
+      COREPORT_DIPSET(0x0200, "9" )
+INPUT_PORTS_END
+
+static void init_pentacps(void) {
+  core_gameData = &pentacuptGameData;
+}
+
+// The Rev S game is more or less a copy of the T model.
+// Only difference we could spot:
+// When you beat the top score you are awarded two replays, one when you beat the second-highest score.
+
+// The ROM labels just say "[1-4] REV. S" so I named the ROMs similar to the existing set but with an S each.
+
+ROM_START(pentacps)
+  NORMALREGION(0x10000, REGION_CPU1)
+  ROM_LOAD("micros_1.bin", 0x0000, 0x0800, CRC(c563c419) SHA1(b4e6711125c8222f4b299e23ee12edfe1c92b52f))
+  ROM_LOAD("micros_2.bin", 0x0800, 0x0800, CRC(46ffd9bf) SHA1(4feae6e8fe6929481d89b00d743fca02e40fb7b8))
+  ROM_LOAD("microt_3.bin", 0x1000, 0x0800, CRC(cefb0966) SHA1(836491745417fc0d5f88c01a9c69a5c322d194be)) // same as for rev. T
+  ROM_LOAD("micros_4.bin", 0x1800, 0x0800, CRC(c7fcb6d8) SHA1(2f6f7aa5705e938a9fedfa4e357e720a1f743a26))
+ROM_END
+CORE_CLONEDEFNV(pentacps,pentacp2,"Pentacup (rev. S)",1980,"Micropin",pentacp2,0)

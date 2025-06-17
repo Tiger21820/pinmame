@@ -3,9 +3,26 @@ What's new in Visual PinMAME:
 (see whatsnew.txt for the PinMAME core changes!)
 
 
-Version 3.6 (XX XXth, 2024) - "Sounds good III / Looks good"
+Version 3.7 (XX XXth, 2025) - ""
+------------------------------------------------------------------------------
+- Add windows COM-API method 'PMBuildVersion' returning e.g. 30700.4711 with build number (e.g. 4711) as decimal
+
+- Easier to upgrade game/rom aliases: There is now a default alias file called 'VPMAlias_template.txt', which contains all builtin (actually compiled into the library itself) aliases,
+  so there is no need for a 'VPMAlias.txt' provided with the installation anymore.
+  An optionally created 'VPMAlias.txt' only needs your very personal entries from now on:
+   If you create a 'VPMAlias.txt' file in the VPinMAME folder, it will alias an input rom name to the specified (real) rom.
+   Format example:
+    mytallica,mtl_180hc
+    myacdc,acd_170hc
+   This can be used to allow to use different PUP or DOF profiles per game (for reskins and such).
+
+Version 3.6 (January 29th, 2025) - "Sounds good III / Looks good"
 ------------------------------------------------------------------------------
 - Add 'ModOutputType' to COM-API for new PWM support (see whatsnew.txt and https://github.com/vpinball/pinmame/pull/89 for details and usage)
+
+- Add 'TimeFence' to COM-API for setting a time marker that suspends the emulation when reached until the time fence is moved further away.
+  So in general, as long as also using the newer core.vbs (10.8.X) on the Visual Pinball side, this vastly improves the interaction between the two programs
+  (less stutter, etc)
 
 - Add new 'Extend Mono sound to Stereo' option, to help multi channel (e.g. 5.1 or 7.1 speaker setup) sound system users
 
@@ -36,10 +53,11 @@ Version 3.3 (December 24th, 2020) - "20 years already?"
 ------------------------------------------------------------------------------
 - New logos by tictox
 
-- If you create a VPMAlias.txt file in the VPinMAME folder, it will alias an input rom name to the specified (real) rom. Format example:
+- If you create a 'VPMAlias.txt' file in the VPinMAME folder, it will alias an input rom name to the specified (real) rom. Format example:
    mytallica,mtl_180hc
    myacdc,acd_170hc
   This can be used to allow to use different PUP or DOF profiles per game (for reskins and such).
+  EDIT: There is nowadays a file called 'VPMAlias_template.txt' which contains all builtin aliases (from version 3.7 up).
 
 - Fix the additional .raw/non-averaged file output dumping of GTS3 DMDs
 

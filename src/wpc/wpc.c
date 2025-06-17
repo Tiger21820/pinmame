@@ -11,6 +11,11 @@
 #include "core.h"
 #include "wpc.h"
 #include "bulb.h"
+#ifdef PINMAME_HOST_UART
+#include "uart_16c450.h"
+#include "uart_8251.h"
+#include "uart_host.h"
+#endif
 #ifdef PROC_SUPPORT
 #include "p-roc/p-roc.h"
 #endif
@@ -19,12 +24,11 @@
 #define DEBUG_GI           0 /* debug GI PWM code - more printf stuff basically */
 #define DEBUG_GI_W         0 /* debug GI write - even more printf stuff */
 #define WPC_FAST_FLIP      1
-#define WPC_VBLANKDIV      32/* This steers how precise the DMD FIRQ interrupt is (as it depends on the DMD_FIRQLINE) */
-                             /* Best should be 64, but this leads to instability for some machines DMD (e.g. T2)      */
-                             /* Also see notes above the wpc_vblank routine for DMD timings */
-/*-- no of DMD frames to add together to create shades --*/
-/*-- (hardcoded, do not change)                        --*/
-#define DMD_FRAMES         3 /* Some early machines like T2 could in some few animations (like T2 attract mode) profit from more shades, but very tricky to get right without flicker ! */
+#ifdef PROC_SUPPORT
+#define WPC_INTERFACE_UPD_PER_FRAME      32 // Not sure how PROC handles its input/output so keep the value before interrupt refactoring
+#else
+#define WPC_INTERFACE_UPD_PER_FRAME       1 // For regular lib/V/PinMame, one interface update at 60Hz should be enough (it's what most other drivers do)
+#endif
 
 /*-- Smoothing values --*/
 #if defined(PROC_SUPPORT) || defined(PPUC_SUPPORT)
@@ -41,6 +45,8 @@
 /*-- IRQ frequency, most WPC functions are performed at 1/16 of this frequency --*/
 #define WPC_IRQFREQ        (8000000./8192.) /* IRQ Frequency-Timed by JD (976) */
 
+#define DMD_ROWFREQ        (2000000./(16.*16.*2.)) // DMD row frequency deduced from schematics 16.9148.1 (half of length is serial dot shift then column latch)
+
 #define GENWPC_HASDMD      (GEN_ALLWPC & ~(GEN_WPCALPHA_1|GEN_WPCALPHA_2))
 #define GENWPC_HASFLIPTRON (GEN_ALLWPC & ~(GEN_WPCALPHA_1|GEN_WPCALPHA_2|GEN_WPCDMD))
 #define GENWPC_HASWPC95    (GEN_WPC95 | GEN_WPC95DCS)
@@ -52,17 +58,20 @@
 /  local WPC functions
 /----------------------*/
 /*-- interrupt handling --*/
-static INTERRUPT_GEN(wpc_vblank);
 static INTERRUPT_GEN(wpc_irq);
+static void wpc_highres_timer(int param);
 
 /*-- PIC security chip emulation --*/
 static int  wpc_pic_r(void);
 static void wpc_pic_w(int data);
 static void wpc_serialCnv(const char no[21], UINT8 pic[16], UINT8 code[3]);
+
 /*-- DMD --*/
 static VIDEO_START(wpc_dmd);
-PINMAME_VIDEO_UPDATE(wpcdmd_update);
+static void wpc_dmd_hsync(int);
+PINMAME_VIDEO_UPDATE(wpcdmd_update32);
 PINMAME_VIDEO_UPDATE(wpcdmd_update64);
+
 /*-- protected memory --*/
 static WRITE_HANDLER(wpc_ram_w);
 
@@ -72,27 +81,14 @@ static MACHINE_STOP(wpc);
 static NVRAM_HANDLER(wpc);
 static SWITCH_UPDATE(wpc);
 
-/*------------------------
-/  DMD display registers
-/-------------------------*/
-#define DMD_PAGE3000    (0x3fb9 - WPC_BASE)
-#define DMD_PAGE3200    (0x3fb8 - WPC_BASE)
-#define DMD_PAGE3400    (0x3fbb - WPC_BASE)
-#define DMD_PAGE3600    (0x3fba - WPC_BASE)
-#define DMD_PAGE3A00    (0x3fbc - WPC_BASE)
-#define DMD_PAGE3800    (0x3fbe - WPC_BASE)
-#define DMD_VISIBLEPAGE (0x3fbf - WPC_BASE)
-#define DMD_FIRQLINE    (0x3fbd - WPC_BASE)
+/*-- external interfaces (input, display, PROC,...) --*/
+static INTERRUPT_GEN(wpc_interface_update);
+
 
 /*---------------------
 /  Global variables
 /---------------------*/
 UINT8 *wpc_data;     /* WPC registers */
-
-#if defined(VPINMAME) || defined(LIBPINMAME)
-extern UINT8  g_raw_gtswpc_dmd[];
-extern UINT32 g_raw_gtswpc_dmdframes;
-#endif
 
 const struct core_dispLayout wpc_dispAlpha[] = {
   {0,0, 0,13,CORE_SEG16R},{0,26,13,2,CORE_SEG16D},{0,30,15,1,CORE_SEG16N},
@@ -100,7 +96,7 @@ const struct core_dispLayout wpc_dispAlpha[] = {
   {0}
 };
 const struct core_dispLayout wpc_dispDMD[] = {
-  {0,0,32,128,CORE_DMD,(genf *)wpcdmd_update,NULL}, {0}
+  {0,0,32,128,CORE_DMD,(genf *)wpcdmd_update32,NULL}, {0}
 };
 const struct core_dispLayout wpc_dispDMD64[] = {
   {0,0, 0,5,CORE_SEG7},
@@ -115,7 +111,7 @@ static struct {
   UINT32  solData;        /* current value of solenoids 1-28 */
   UINT8   solFlip, solFlipPulse;  /* current value of flipper solenoids */
   UINT8   nonFlipBits;    /* flipper solenoids not used for flipper (smoothed) */
-  int     vblankCount;    /* vblank interrupt counter */
+  int     interfaceUpdateCount;    /* interface update per frame counter */
   core_tSeg alphaSeg;
   struct {
     UINT8 sData[16];
@@ -126,16 +122,17 @@ static struct {
     int   codeW;
   } pic;
   int pageMask;           /* page handling */
-  int firqSrc;            /* source of last firq */
   UINT8 diagnosticLed;
   int zc;                 /* zero cross flag */
   double gi_on_time[CORE_MAXGI]; /* Global time when GI Triac was turned on */
   volatile UINT8 conductingGITriacs; /* Current conducting triacs of WPC GI strings (triacs conduct if pulsed, then continue to conduct until current is near 0, that it to say at zero cross) */
+  volatile UINT8 conductingChaseLightTriacs; /* Current conducting triacs of CFTBL Chase light GI strings (triacs conduct if pulsed, then continue to conduct until current is near 0, that it to say at zero cross) */
   UINT32 solenoidbits[64];
   int modsol_count;
   int modsol_sample;
-
-  UINT8 frameNo;
+  mame_timer* highres_timer;
+  int wpcFIRQ;            // State of the WPC chip high res timer FIRQ output
+  int sndFIRQ;            // State of the FIRQ from pre DCS sound board (part number A-12738)
 } wpclocals;
 
 // Have to put this here, instead of wpclocals, since wpclocals is cleared/initialized AFTER game specific init.   Grrr.
@@ -143,8 +140,9 @@ static int wpc_modsol_aux_board = 0;
 static int wpc_fastflip_addr = 0;
 
 static struct {
-  UINT8 *DMDFrames[DMD_FRAMES];
-  int    nextDMDFrame;
+  int    row;                    // Rasterizer row position
+  int    firq;                   // State of FIRQ output line to CPU
+  core_tDMDPWMState pwm_state;
 } dmdlocals;
 
 /*-- pointers --*/
@@ -156,28 +154,28 @@ UINT8 *wpc_ram = NULL;
 /----------------------------*/
 static MEMORY_READ_START(wpc_readmem)
   { 0x0000, 0x2fff, MRA_RAM },
-  { 0x3000, 0x31ff, MRA_BANK4 },  /* DMD */
-  { 0x3200, 0x33ff, MRA_BANK5 },  /* DMD */
-  { 0x3400, 0x35ff, MRA_BANK6 },  /* DMD */
-  { 0x3600, 0x37ff, MRA_BANK7 },  /* DMD */
+  { 0x3000, 0x31ff, MRA_BANK4 },  /* DMD WPC-95 only */
+  { 0x3200, 0x33ff, MRA_BANK5 },  /* DMD WPC-95 only */
+  { 0x3400, 0x35ff, MRA_BANK6 },  /* DMD WPC-95 only */
+  { 0x3600, 0x37ff, MRA_BANK7 },  /* DMD WPC-95 only */
   { 0x3800, 0x39ff, MRA_BANK2 },  /* DMD */
   { 0x3A00, 0x3bff, MRA_BANK3 },  /* DMD */
   { 0x3c00, 0x3faf, MRA_RAM },
-  { 0x3fb0, 0x3fff, wpc_r },
-  { 0x4000, 0x7fff, MRA_BANK1 },
+  { 0x3fb0, 0x3fff, wpc_r },      /* WPC chip and IO/DMD/aux boards */
+  { 0x4000, 0x7fff, MRA_BANK1 },  /* bank switched ROM */
   { 0x8000, 0xffff, MRA_ROM },
 MEMORY_END
 
 static MEMORY_WRITE_START(wpc_writemem)
   { 0x0000, 0x2fff, wpc_ram_w, &wpc_ram },
-  { 0x3000, 0x31ff, MWA_BANK4 },  /* DMD */
-  { 0x3200, 0x33ff, MWA_BANK5 },  /* DMD */
-  { 0x3400, 0x35ff, MWA_BANK6 },  /* DMD */
-  { 0x3600, 0x37ff, MWA_BANK7 },  /* DMD */
-  { 0x3800, 0x39ff, MWA_BANK2 },  /* DMD */
-  { 0x3A00, 0x3bff, MWA_BANK3 },  /* DMD */
+  { 0x3000, 0x31ff, MWA_BANK4 },        /* DMD WPC-95 only */
+  { 0x3200, 0x33ff, MWA_BANK5 },        /* DMD WPC-95 only */
+  { 0x3400, 0x35ff, MWA_BANK6 },        /* DMD WPC-95 only */
+  { 0x3600, 0x37ff, MWA_BANK7 },        /* DMD WPC-95 only */
+  { 0x3800, 0x39ff, MWA_BANK2 },        /* DMD */
+  { 0x3A00, 0x3bff, MWA_BANK3 },        /* DMD */
   { 0x3c00, 0x3faf, MWA_RAM },
-  { 0x3fb0, 0x3fff, wpc_w, &wpc_data },
+  { 0x3fb0, 0x3fff, wpc_w, &wpc_data }, /* WPC chip and IO/DMD/aux boards */
   { 0x8000, 0xffff, MWA_ROM },
 MEMORY_END
 
@@ -227,11 +225,12 @@ static void wpc_zc(int data) {
    // More precise implementation with better physic emulation
    if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_GI | CORE_MODOUT_FORCE_ON))
       core_write_pwm_output_8b(CORE_MODOUT_GI0, wpclocals.conductingGITriacs & 0x1F);
-   if (core_gameData->hw.gameSpecific2 == WPC_CFTBL && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_LAMPS | CORE_MODOUT_FORCE_ON))) // CFTBL chase lights
+   if ((core_gameData->hw.gameSpecific1 & WPC_CFTBL) && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_LAMPS | CORE_MODOUT_FORCE_ON))) // CFTBL chase lights
    {
       int chase_2b = ((coreGlobals.pulsedSolState >> 22) & 2) | ((coreGlobals.pulsedSolState >> 19) & 1); // 2 bit decoder => select one of the 4 chase light strings
       int chase_gi = ((wpclocals.conductingGITriacs & 1) ? 0x0F : 0x00) | ((wpclocals.conductingGITriacs & 8) ? 0xF0 : 0x00); // GI outputs
-      core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 64, chase_gi & (0x11 << chase_2b));
+      wpclocals.conductingChaseLightTriacs = chase_gi & (0x11 << chase_2b);
+      core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 64, wpclocals.conductingChaseLightTriacs);
    }
 }
 
@@ -276,7 +275,7 @@ void wpc_set_fastflip_addr(int addr)
       if (solNum > 27 && (core_gameData->gen & GEN_ALLWPC)) { // 29-32 GameOn
         switch (solNum) {
           case 28:
-            fprintf(stderr, "SOL28: %s\n", enabled ? "game over" : "start game");
+            //fprintf(stderr, "SOL28: %s\n", enabled ? "game over" : "start game");
             // If game supports this "GameOver" solenoid, it's safe to disable the
             // flippers here (something that happens when the game starts up) and
             // rely on solenoid 30 telling us when to enable them.
@@ -288,7 +287,7 @@ void wpc_set_fastflip_addr(int addr)
             }
             break;
           case 30:
-            fprintf(stderr, "SOL30: %s flippers\n", enabled ? "enable" : "disable");
+            //fprintf(stderr, "SOL30: %s flippers\n", enabled ? "enable" : "disable");
             procConfigureFlipperSwitchRules(enabled);
             // enable flippers on pre-fliptronic games (with no PRFlippers)
             if (core_gameData->gen & (GEN_WPCALPHA_1 | GEN_WPCALPHA_2 | GEN_WPCDMD)) {
@@ -296,7 +295,7 @@ void wpc_set_fastflip_addr(int addr)
             }
             break;
           default:
-            fprintf(stderr, "SOL%d (%s) does not map\n", solNum, enabled ? "on" : "off");
+            //fprintf(stderr, "SOL%d (%s) does not map\n", solNum, enabled ? "on" : "off");
             return;
         }
       } else {
@@ -327,7 +326,7 @@ void wpc_set_fastflip_addr(int addr)
       // note that this maps to same P-ROC coils as SOL 36-43 on non-WPC95
       procDriveCoil(solNum+94, enabled);
     } else {
-      fprintf(stderr, "SOL%d (%s) does not map\n", solNum, enabled ? "on" : "off");
+      //fprintf(stderr, "SOL%d (%s) does not map\n", solNum, enabled ? "on" : "off");
       return;
     }
     // TODO:PROC: Upper flipper circuits in WPC-95. (Is this still the case?)
@@ -361,7 +360,7 @@ static MACHINE_DRIVER_START(wpc)
   MDRV_CORE_INIT_RESET_STOP(wpc,NULL,wpc)
   MDRV_CPU_ADD(M6809, 2000000) // MC6809E, 68B09E XTAL8/4
   MDRV_CPU_MEMORY(wpc_readmem, wpc_writemem)
-  MDRV_CPU_VBLANK_INT(wpc_vblank, WPC_VBLANKDIV)
+  MDRV_CPU_VBLANK_INT(wpc_interface_update, WPC_INTERFACE_UPD_PER_FRAME)
   MDRV_CPU_PERIODIC_INT(wpc_irq, WPC_IRQFREQ)
   MDRV_NVRAM_HANDLER(wpc)
   MDRV_DIPS(8)
@@ -389,86 +388,60 @@ MACHINE_DRIVER_END
 MACHINE_DRIVER_START(wpc_dmd)
   MDRV_IMPORT_FROM(wpc)
   MDRV_VIDEO_START(wpc_dmd)
+  MDRV_TIMER_ADD(wpc_dmd_hsync,DMD_ROWFREQ)
 MACHINE_DRIVER_END
 
 MACHINE_DRIVER_START(wpc_dmdS)
   MDRV_IMPORT_FROM(wpc)
   MDRV_VIDEO_START(wpc_dmd)
+  MDRV_TIMER_ADD(wpc_dmd_hsync,DMD_ROWFREQ)
   MDRV_IMPORT_FROM(wmssnd_wpcs)
 MACHINE_DRIVER_END
 
 MACHINE_DRIVER_START(wpc_dcsS)
   MDRV_IMPORT_FROM(wpc)
   MDRV_VIDEO_START(wpc_dmd)
+  MDRV_TIMER_ADD(wpc_dmd_hsync,DMD_ROWFREQ)
   MDRV_IMPORT_FROM(wmssnd_dcs1)
 MACHINE_DRIVER_END
 
 MACHINE_DRIVER_START(wpc_95S)
   MDRV_IMPORT_FROM(wpc)
   MDRV_VIDEO_START(wpc_dmd)
+  MDRV_TIMER_ADD(wpc_dmd_hsync,DMD_ROWFREQ)
   MDRV_IMPORT_FROM(wmssnd_dcs2)
 MACHINE_DRIVER_END
 
-/* The FIRQ line is wired between the WPC chip and all external I/Os (sound) */
-/* The DMD firq must be generated via the WPC but I don't know how. */
-static void wpc_firq(int set, int src) {
-  if (set)
-    wpclocals.firqSrc |= src;
-  else
-    wpclocals.firqSrc &= ~src;
-  cpu_set_irq_line(WPC_CPUNO, M6809_FIRQ_LINE, wpclocals.firqSrc ? HOLD_LINE : CLEAR_LINE);
+// The FIRQ line is wired to 2 or 3 sources:
+// - the WPC FIRQ output, which is triggered by its internal high res timer
+// - the programmable DMD FIRQ output (raised when a choosen row is reached, cleared when the FIRQ row is defined)
+// - the FIRQ from pre DCS sound board (sound board part A-12738)
+static void update_firq(void) {
+  cpu_set_irq_line(WPC_CPUNO, M6809_FIRQ_LINE, (wpclocals.wpcFIRQ | wpclocals.sndFIRQ | dmdlocals.firq) ? HOLD_LINE : CLEAR_LINE);
+}
+
+// High resolution timer provided by the WPC chip. Used by alpha gen games to dim segments
+// For example, BOP uses it to dim/blink entries in the service menu
+static void wpc_highres_timer(int param) {
+  // printf("%8.5f High res timer FIRQ\n", timer_get_time());
+  wpclocals.wpcFIRQ = 1;
+  update_firq();
 }
 
 /*--------------------------------------------------------------
-/ This is generated WPC_VBLANKDIV times per frame (=60*WPC_VBLANKDIV Hz)
-/ = every 32/(WPC_VBLANKDIV/2) lines.
-/ Generate a FIRQ if it matches the DMD line (DMD_FIRQLINE), so = 120Hz //!! note that on real machines one gets 122.1 (measured by lucky1) (8000000./65536.), BUT implementing this via a separate timer always leads to flicker on all kinds of machines!
-/ Also do the smoothing of the solenoids and lamps
+/ This is generated WPC_INTERFACE_UPD_PER_FRAME times per frame (=60*WPC_INTERFACE_UPD_PER_FRAME Hz)
+/ to handle overall bookkeeping (switch update, PROC management, smoothing of the solenoids and lamps, ...)
 /--------------------------------------------------------------*/
-static INTERRUPT_GEN(wpc_vblank) {
-#ifdef PROC_SUPPORT
-	static int gi_last[CORE_MAXGI];
-	int changed_gi[CORE_MAXGI];
+static INTERRUPT_GEN(wpc_interface_update) {
+  #ifdef PROC_SUPPORT
+	 static int gi_last[CORE_MAXGI];
+	 int changed_gi[CORE_MAXGI];
+	  if (coreGlobals.p_rocEn) {
+		 procTickleWatchdog();
+	  }
+  #endif
 
-	if (coreGlobals.p_rocEn) {
-		procTickleWatchdog();
-	}
-#endif
-
-  wpclocals.vblankCount++;
-
-  if (core_gameData->gen & GENWPC_HASDMD) {
-    /*-- check if the DMD line (roughly) matches the requested interrupt line */
-    if ((wpclocals.vblankCount % (WPC_VBLANKDIV/2)) == (wpc_data[DMD_FIRQLINE]*(WPC_VBLANKDIV/2)/32))
-      wpc_firq(TRUE, WPC_FIRQ_DMD);
-    if ((wpclocals.vblankCount % (WPC_VBLANKDIV/2)) == 0) {
-      /*-- This is the real VBLANK interrupt --*/
-      if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH: DMD is toggled between half and full page size using DMD_FIRQLINE register bit
-        if (wpc_data[DMD_FIRQLINE] & 0x20) { // half page (used by menu system)
-          dmdlocals.DMDFrames[0] = dmdlocals.DMDFrames[1] = memory_region(WPC_DMDREGION) + (wpc_data[DMD_VISIBLEPAGE] & 0x0f) * 0x200 + (wpc_data[DMD_VISIBLEPAGE] % 2) * 0x200;
-        } else { // full page
-          dmdlocals.DMDFrames[wpclocals.frameNo] = memory_region(WPC_DMDREGION) + wpc_data[DMD_VISIBLEPAGE] * 0x400;
-        }
-        wpclocals.frameNo = 1 - wpclocals.frameNo;
-      } else {
-        dmdlocals.DMDFrames[dmdlocals.nextDMDFrame] = memory_region(WPC_DMDREGION) + (wpc_data[DMD_VISIBLEPAGE] & 0x0f) * 0x200;
-      }
-#ifdef PROC_SUPPORT
-			if (coreGlobals.p_rocEn) {
-				if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH: reasonable guess on how to handle two frames only
-					procFillDMDSubFrame(3 - frameNo, dmdlocals.DMDFrames[1 - frameNo], 0x400);
-				} else {
-					/* looks like P-ROC uses the last 3 subframes sent rather than the first 3 */
-					procFillDMDSubFrame(dmdlocals.nextDMDFrame+1, dmdlocals.DMDFrames[dmdlocals.nextDMDFrame], 0x200);
-				}
-			}
-
-			/* Don't explicitly update the DMD from here. The P-ROC code
-			   will update after the next DMD event. */
-#endif
-      dmdlocals.nextDMDFrame = (dmdlocals.nextDMDFrame + 1) % DMD_FRAMES;
-    }
-  }
+  wpclocals.interfaceUpdateCount++;
 
   /*--------------------------------------------------------
   /  Most solenoids don't have a holding coil so the software
@@ -478,14 +451,12 @@ static INTERRUPT_GEN(wpc_vblank) {
   /  and only turn the solenoid off if it has not been pulsed
   /  during that time.
   /-------------------------------------------------------------*/
-  if ((wpclocals.vblankCount % (WPC_VBLANKDIV*WPC_SOLSMOOTH)) == 0) {
-
+  if ((wpclocals.interfaceUpdateCount % (WPC_INTERFACE_UPD_PER_FRAME*WPC_SOLSMOOTH)) == 0) {
     coreGlobals.solenoids = (wpc_data[WPC_SOLENOID1] << 24) |
                             (wpc_data[WPC_SOLENOID3] << 16) |
                             (wpc_data[WPC_SOLENOID4] <<  8) |
                              wpc_data[WPC_SOLENOID2];
-
-#ifdef PROC_SUPPORT
+    #ifdef PROC_SUPPORT
     //TODO/PROC: Check implementation
     if (coreGlobals.p_rocEn) {
       int ii;
@@ -498,7 +469,7 @@ static INTERRUPT_GEN(wpc_vblank) {
         for (ii=0; ii<64; ii++) {
           if (chgSol & 0x1) {
             if (mame_debug) {
-              fprintf( stderr,"Drive SOL%02d %s\n", ii, (allSol & 0x1) ? "on" : "off");
+              //fprintf( stderr,"Drive SOL%02d %s\n", ii, (allSol & 0x1) ? "on" : "off");
             }
             wpc_proc_solenoid_handler(ii, allSol & 0x1, TRUE);
           }
@@ -517,28 +488,27 @@ static INTERRUPT_GEN(wpc_vblank) {
         }
       }
     }
-#endif
+    #endif
 
     wpc_data[WPC_SOLENOID1] = wpc_data[WPC_SOLENOID2] = 0;
     wpc_data[WPC_SOLENOID3] = wpc_data[WPC_SOLENOID4] = 0;
-    // Move top 3 GI to solenoids -> gameOn = sol31
+
+    // Move top 3 GI to solenoids -> gameOn
     coreGlobals.solenoids2 = (wpc_data[WPC_GILAMPS] & 0xe0)<<3;
     if (core_gameData->gen & GENWPC_HASFLIPTRON) {
       coreGlobals.solenoids2 |= wpclocals.solFlip;
       wpclocals.solFlip = wpclocals.solFlipPulse;
     }
-    // If fastflipaddr is set, we want sol31 to be triggered by a nonzero value
-    // in that location
+
+    // If fastflipaddr is set, we want sol31 to be triggered by a nonzero value in that location
     if (wpc_fastflip_addr > 0)
     {
       coreGlobals.solenoids2 &= ~(0x400);
       if (wpc_ram[wpc_fastflip_addr] > 0)
         coreGlobals.solenoids2 |= 0x400;
     }
-
   }
-  else if (((wpclocals.vblankCount % WPC_VBLANKDIV) == 0) &&
-           (core_gameData->gen & GENWPC_HASFLIPTRON)) {
+  else if (((wpclocals.interfaceUpdateCount % WPC_INTERFACE_UPD_PER_FRAME) == 0) && (core_gameData->gen & GENWPC_HASFLIPTRON)) {
     coreGlobals.solenoids2 = (coreGlobals.solenoids2 & (0xffffff00 | wpclocals.nonFlipBits)) | wpclocals.solFlip;
     wpclocals.solFlip = (wpclocals.solFlip & wpclocals.nonFlipBits) | wpclocals.solFlipPulse;
   }
@@ -560,8 +530,8 @@ static INTERRUPT_GEN(wpc_vblank) {
   / For the game it doesn't really matter but it confused me when
   / the lamp code here worked for 9.2 but not in 9.4.
   /-------------------------------------------------------------*/
-  if ((wpclocals.vblankCount % (WPC_VBLANKDIV*WPC_LAMPSMOOTH)) == 0) {
-#ifdef PROC_SUPPORT
+  if ((wpclocals.interfaceUpdateCount % (WPC_INTERFACE_UPD_PER_FRAME*WPC_LAMPSMOOTH)) == 0) {
+    #ifdef PROC_SUPPORT
 		if (coreGlobals.p_rocEn) {
 			int col, row, procLamp;
 			for(col = 0; col < CORE_STDLAMPCOLS; col++) {
@@ -581,11 +551,13 @@ static INTERRUPT_GEN(wpc_vblank) {
 			}
 			procFlush();
 		}
-#endif
-    memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
-    memset(coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+    #endif
+    memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+    memset((void*)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
   }
-  if ((wpclocals.vblankCount % (WPC_VBLANKDIV*WPC_DISPLAYSMOOTH)) == 0) {
+
+  // Update segments & diagnostic leds accumulated over a few 'frames'
+  if ((wpclocals.interfaceUpdateCount % (WPC_INTERFACE_UPD_PER_FRAME*WPC_DISPLAYSMOOTH)) == 0) {
     if ((core_gameData->gen & GENWPC_HASDMD) == 0) {
       memcpy(coreGlobals.segments, wpclocals.alphaSeg, sizeof(coreGlobals.segments));
       coreGlobals.segments[15].w &= ~0x8080; coreGlobals.segments[35].w &= ~0x8080;
@@ -593,51 +565,46 @@ static INTERRUPT_GEN(wpc_vblank) {
     }
     coreGlobals.diagnosticLed = wpclocals.diagnosticLed;
     wpclocals.diagnosticLed = 0;
-
-    //Display status of GI strings
-    #if PRINT_GI_DATA
-    {
-      int i;
-      for(i=0;i<CORE_MAXGI;i++)
-        printf("GI[%d]=%d ",i,coreGlobals.gi[i]);
-      printf("\n");
-    }
-    #endif
   }
 
-#ifdef PROC_SUPPORT
-	// Check for any coils that need to be disabled due to inactivity.
-	if (coreGlobals.p_rocEn) {
-		procCheckActiveCoils();
-		procFullTroughDisablesFlippers();
-	}
-#endif
+  #ifdef PROC_SUPPORT
+  // Check for any coils that need to be disabled due to inactivity.
+  if (coreGlobals.p_rocEn) {
+    procCheckActiveCoils();
+    procFullTroughDisablesFlippers();
+  }
+  #endif
 
   /*------------------------------
-  /  Update switches every vblank; or on every pass when using P-ROC
+  /  Update switches every vblank or on every interface update when using P-ROC
   /-------------------------------*/
-  if (
-#ifdef LIBPINMAME
-      1 ||
-#endif
-#ifdef PROC_SUPPORT
-      coreGlobals.p_rocEn ||
-#endif
-      (wpclocals.vblankCount % WPC_VBLANKDIV) == 0) /*-- update switches --*/
-    core_updateSw((core_gameData->gen & GENWPC_HASFLIPTRON) ? TRUE : (wpc_data[WPC_GILAMPS] & 0x80));
+  #ifdef PROC_SUPPORT
+    if (coreGlobals.p_rocEn || (wpclocals.interfaceUpdateCount % WPC_INTERFACE_UPD_PER_FRAME) == 0))
+  #endif
+  core_updateSw((core_gameData->gen & GENWPC_HASFLIPTRON) ? TRUE : (wpc_data[WPC_GILAMPS] & 0x80));
 }
 
 /*----------------------
 / Emulate the WPC chip
 /-----------------------*/
 READ_HANDLER(wpc_r) {
+#ifdef PINMAME_HOST_UART
+  if (offset < 8
+      && (core_gameData->gen & GENWPC_HASWPC95)
+      && pmoptions.serial_device != NULL)
+  {
+    /* Emulated UART(16C450) on WPC95 AV board */
+    return uart_16c450_read(offset);
+  }
+  else 
+#endif
   switch (offset) {
     case WPC_FLIPPERS: /* Flipper switches */
       if ((core_gameData->gen & GENWPC_HASWPC95) == 0)
         return ~coreGlobals.swMatrix[CORE_FLIPPERSWCOL];
       break;
     case WPC_FLIPPERSW95:
-      if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH: reel switches
+      if (core_gameData->hw.gameSpecific1 & WPC_PH) { // PH: reel switches
         return ~coreGlobals.swMatrix[3];
       }
       if (core_gameData->gen & GENWPC_HASWPC95)
@@ -657,9 +624,9 @@ READ_HANDLER(wpc_r) {
     case WPC_SHIFTBIT:
     case WPC_SHIFTBIT2:
       return 1<<(wpc_data[offset] & 0x07);
-    case WPC_FIRQSRC: /* FIRQ source */
-      //DBGLOG(("R:FIRQSRC\n"));
-      return (wpclocals.firqSrc & WPC_FIRQ_DMD) ? 0x00 : 0x80;
+    case WPC_HIGHRESTIMER:
+      //DBGLOG(("R:WPC_HIGHRESTIMER\n"));
+      return (wpclocals.wpcFIRQ != 0) ? 0x80 : 0x00;
     case WPC_DIPSWITCH:
       return core_getDip(0);
     case WPC_RTCHOUR: {
@@ -702,54 +669,63 @@ READ_HANDLER(wpc_r) {
       }
       return systime->tm_min;
     }
-    case WPC_WATCHDOG:
-      //Zero cross detection flag is read from Bit 8.
+    case WPC_ZC_IRQ_ACK:
+      // Bit7: zero cross state (latched value reseted on read)
+      // Bit2: periodic IRQ enabled
       wpc_data[offset] = (wpclocals.zc<<7) | (wpc_data[offset] & 0x7f);
-      #if DEBUG_GI
-      if (wpclocals.zc)
-         printf("[%f] Zero Cross CPU read\n", timer_get_time());
-      #endif
-      //Reset flag now that it's been read.
+      // FIXME it seems that the zero cross should just be the live zc state, not a latched value reseted on read
       wpclocals.zc = 0;
       break;
-    case WPC_SOUNDIF:
-      return sndbrd_0_data_r(0);
-    case WPC_SOUNDBACK:
-      if (core_gameData->gen & (GEN_WPCALPHA_2|GEN_WPCDMD|GEN_WPCFLIPTRON))
-        wpc_firq(FALSE, WPC_FIRQ_SOUND); // Ack FIRQ on read?
-      return sndbrd_0_ctrl_r(0);
-    case WPC_PRINTBUSY:
-      return 0;
-    case DMD_VISIBLEPAGE:
-      break;
-    case DMD_PAGE3000:
-    case DMD_PAGE3200:
-    case DMD_PAGE3400:
-    case DMD_PAGE3600:
-    case DMD_PAGE3800:
-    case DMD_PAGE3A00:
-      return 0; /* these can't be read */
-    case DMD_FIRQLINE:
-      return (wpclocals.firqSrc & WPC_FIRQ_DMD) ? 0x80 : 0x00;
-    case 0x3fd0-WPC_BASE:
+    case WPC_SND_S11_DATA0:
       if (sndbrd_0_type() == SNDBRD_S11CS) {
         DBGLOG(("DD_DATA_R: %04x %02x\n", activecpu_get_pc(), sndbrd_0_data_r(0)));
         return sndbrd_0_data_r(0);
       }
       break;
-    case 0x3fd2-WPC_BASE:
+    case WPC_SND_S11_CTRL:
       if (sndbrd_0_type() == SNDBRD_S11CS) {
         DBGLOG(("DD_CTRL_R: %04x %02x\n", activecpu_get_pc(), sndbrd_0_ctrl_r(0)));
         return sndbrd_0_ctrl_r(0);
       }
       break;
-    case 0x3fd3-WPC_BASE:
+    case WPC_SND_S11_UNK:
       if (sndbrd_0_type() == SNDBRD_S11CS) {
         DBGLOG(("DD_UNKNOWN_R: %04x\n", activecpu_get_pc()));
         UINT8 dd_unknown = sndbrd_0_ctrl_r(0) & 0x10 ? 0x81 : 0;
         return dd_unknown;
       }
       break;
+    case WPC_SND_DATA:
+      if (wpclocals.sndFIRQ != 0)
+      {
+        wpclocals.sndFIRQ = 0;
+        update_firq();
+      }
+      return sndbrd_0_data_r(0);
+    case WPC_SND_CTRL:
+      return sndbrd_0_ctrl_r(0);
+    case WPC_PRINTBUSY:
+      return 0;
+    case WPC_SERIAL_DATA:
+    case WPC_SERIAL_CTRL:
+    case WPC_SERIAL_BAUD:
+#ifdef PINMAME_HOST_UART
+        if (pmoptions.serial_device != NULL) {
+          return uart_8251_read(offset);
+        }
+#endif
+        break;
+    case WPC_DMD_SHOWPAGE:
+      break;
+    case WPC_DMD_PAGE3000:
+    case WPC_DMD_PAGE3200:
+    case WPC_DMD_PAGE3400:
+    case WPC_DMD_PAGE3600:
+    case WPC_DMD_PAGE3800:
+    case WPC_DMD_PAGE3A00:
+      return 0; /* these can't be read */
+    case WPC_DMD_FIRQLINE: // Read state of DMD controller board FIRQ
+      return dmdlocals.firq ? 0x80 : 0x00;
     default:
       DBGLOG(("wpc_r %4x\n", offset+WPC_BASE));
       break;
@@ -770,39 +746,54 @@ WRITE_HANDLER(wpc_w) {
   }
 #endif
 
+#ifdef PINMAME_HOST_UART
+  if (offset < 8
+      && (core_gameData->gen & GENWPC_HASWPC95)
+      && pmoptions.serial_device != NULL)
+  {
+    /* Emulated UART(16C450) on WPC95 AV board */
+    uart_16c450_write(offset, data);
+  }
+  else
+#endif
   switch (offset) {
     case WPC_ROMBANK: { /* change rom bank */
       int bank = data & wpclocals.pageMask;
       cpu_setbank(1, memory_region(WPC_ROMREGION)+ bank * 0x4000);
-#ifdef PINMAME
-/* Bank support for CODELIST */
-      cpu_bankid[1] = bank + ( 0x3F ^ wpclocals.pageMask );
-#endif /* PINMAME */
+      #ifdef PINMAME
+        /* Bank support for CODELIST */
+        cpu_bankid[1] = bank + ( 0x3F ^ wpclocals.pageMask );
+      #endif /* PINMAME */
       break;
     }
-    case WPC_FLIPPERS: /* Flipper coils */
+    case WPC_FLIPPERS: /* Flipper coils of Fliptronics 2 Board */
       if ((core_gameData->gen & GENWPC_HASWPC95) == 0) {
         wpclocals.solFlip &= wpclocals.nonFlipBits;
         wpclocals.solFlip |= wpclocals.solFlipPulse = ~data;
-#ifdef WPC_FAST_FLIP
-        coreGlobals.solenoids2 |= wpclocals.solFlip;
-#endif
+        #ifdef WPC_FAST_FLIP
+          coreGlobals.solenoids2 |= wpclocals.solFlip;
+        #endif
+        core_write_pwm_output(CORE_MODOUT_SOL0 + 45 - 1, 4, ~data);
+        core_write_pwm_output(CORE_MODOUT_SOL0 + 33 - 1, 4, (~data) >> 4);
       }
       break;
     case WPC_FLIPPERCOIL95: /* WPC_EXTBOARD4 */
-      if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH: LED digits
+      if (core_gameData->hw.gameSpecific1 & WPC_PH) { // PH: LED digits
         if (data != 0xff) {
           coreGlobals.segments[core_BitColToNum(0xff ^ data)].w = wpclocals.alphaSeg[core_BitColToNum(0xff ^ data)].w = core_bcd2seg7[wpc_data[WPC_EXTBOARD1]];
         }
-      } else if (core_gameData->gen & GENWPC_HASWPC95) {
+      } else if (core_gameData->gen & GENWPC_HASWPC95) { // WPC_FLIPPERCOIL95
         wpclocals.solFlip &= wpclocals.nonFlipBits;
         wpclocals.solFlip |= wpclocals.solFlipPulse = data;
-#ifdef WPC_FAST_FLIP
-        coreGlobals.solenoids2 |= wpclocals.solFlip;
-#endif
+        #ifdef WPC_FAST_FLIP
+          coreGlobals.solenoids2 |= wpclocals.solFlip;
+        #endif
+        core_write_pwm_output(CORE_MODOUT_SOL0 + 45 - 1, 4, data);
+        core_write_pwm_output(CORE_MODOUT_SOL0 + 33 - 1, 4, data >> 4);
       }
-      else if ((core_gameData->gen & GENWPC_HASDMD) == 0)
+      else if ((core_gameData->gen & GENWPC_HASDMD) == 0) // WPC_ALPHA2LO
       {
+        //static double prev; printf("WPC_ALPHA2LO %8.5fms %02x %02x\n", timer_get_time() - prev, wpc_data[WPC_ALPHAPOS], data); prev = timer_get_time();
         wpclocals.alphaSeg[20+wpc_data[WPC_ALPHAPOS]].b.lo |= data;
         if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_ALPHASEGS | CORE_MODOUT_FORCE_ON))
           core_write_pwm_output_8b(CORE_MODOUT_SEG0 + (20 + wpc_data[WPC_ALPHAPOS]) * 2 * 8, data);
@@ -821,7 +812,7 @@ WRITE_HANDLER(wpc_w) {
       break;
     case WPC_LAMPCOLUMN: /* row and column can be written in any order */
       core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0, data, wpc_data[WPC_LAMPROW], 8);
-      if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH uses 192 lamps
+      if (core_gameData->hw.gameSpecific1 & WPC_PH) { // PH uses 192 lamps
         core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0 +  64, data, wpc_data[WPC_EXTBOARD2], 8);
         core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0 + 128, data, wpc_data[WPC_EXTBOARD3], 8);
       }
@@ -842,11 +833,12 @@ WRITE_HANDLER(wpc_w) {
       wpclocals.conductingGITriacs |= data; // Triac that were turned on before will continue to conduct until next zero cross, therefore we 'or' them with previous pulsed state
       if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_GI | CORE_MODOUT_FORCE_ON))
          core_write_pwm_output_8b(CORE_MODOUT_GI0, wpclocals.conductingGITriacs & 0x1F);
-      if (core_gameData->hw.gameSpecific2 == WPC_CFTBL && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_LAMPS | CORE_MODOUT_FORCE_ON))) // CFTBL chase lights
+      if ((core_gameData->hw.gameSpecific1 & WPC_CFTBL) && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_LAMPS | CORE_MODOUT_FORCE_ON))) // CFTBL chase lights
       {
          int chase_2b = ((coreGlobals.pulsedSolState >> 22) & 2) | ((coreGlobals.pulsedSolState >> 19) & 1); // 2 bit decoder => select one of the 4 chase light strings
          int chase_gi = ((wpclocals.conductingGITriacs & 1) ? 0x0F : 0x00) | ((wpclocals.conductingGITriacs & 8) ? 0xF0 : 0x00); // GI outputs
-         core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 64, chase_gi& (0x11 << chase_2b));
+         wpclocals.conductingChaseLightTriacs |= chase_gi & (0x11 << chase_2b);
+         core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 64, wpclocals.conductingChaseLightTriacs);
       }
       double write_time = timer_get_time();
       for (ii = 0, tmp = data; ii < CORE_MAXGI; ii++, tmp >>= 1) {
@@ -873,12 +865,13 @@ WRITE_HANDLER(wpc_w) {
         core_write_masked_pwm_output_8b(CORE_MODOUT_SOL0 + 48, data << 2, 0xFC); // Write 50..55
         core_write_masked_pwm_output_8b(CORE_MODOUT_SOL0 + 56, data >> 6, 0x03); // Write 56..57
       }
-      else if ((core_gameData->gen & GENWPC_HASDMD) == 0)
+      else if ((core_gameData->gen & GENWPC_HASDMD) == 0) // WPC_ALPHAPOS
       {
         // Alphanumeric segment strobing change => turn off previous segment and on the ones of the new selected position
         // Operation is set all segs to 0 (blanking), then strove to next column, then set segments.
         // The delay between setting segments then blanking them is used to a rough PWM dimming
         // Overall timing is 1ms maximum per digit over a 16ms period
+        //static double prev; printf("WPC_ALPHAPOS %8.5fms %02x\n", timer_get_time() - prev, data); prev = timer_get_time();
         if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_ALPHASEGS | CORE_MODOUT_FORCE_ON))
         {
           int prevIndex = CORE_MODOUT_SEG0 + wpc_data[WPC_ALPHAPOS] * 2 * 8;
@@ -893,8 +886,8 @@ WRITE_HANDLER(wpc_w) {
         }
       }
       break; /* just save position */
-    case WPC_EXTBOARD2: /* WPC_ALPHA1 */
-      if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH: lamps 65 .. 128 (data is row of 2nd matrix)
+    case WPC_EXTBOARD2: /* WPC_ALPHA1LO */
+      if (core_gameData->hw.gameSpecific1 & WPC_PH) { // PH: lamps 65 .. 128 (data is row of 2nd matrix)
         core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0 + 64, wpc_data[WPC_LAMPCOLUMN], data, 8);
       }
       else if (wpc_modsol_aux_board == 2)
@@ -903,18 +896,18 @@ WRITE_HANDLER(wpc_w) {
         core_write_masked_pwm_output_8b(CORE_MODOUT_SOL0 + 48, data << 2, 0xFC); // Write 50..55
         core_write_masked_pwm_output_8b(CORE_MODOUT_SOL0 + 56, data >> 6, 0x03); // Write 56..57
       }
-      else if ((core_gameData->gen & GENWPC_HASDMD) == 0)
+      else if ((core_gameData->gen & GENWPC_HASDMD) == 0) // WPC_ALPHA1LO
       {
         wpclocals.alphaSeg[wpc_data[WPC_ALPHAPOS]].b.lo |= data;
         if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_ALPHASEGS | CORE_MODOUT_FORCE_ON))
           core_write_pwm_output_8b(CORE_MODOUT_SEG0 + wpc_data[WPC_ALPHAPOS] * 2 * 8, data);
       }
       break;
-    case WPC_EXTBOARD3:
-      if (core_gameData->hw.gameSpecific2 == WPC_PH) { // PH: lamps 129 .. 192 (data is row of 3rd matrix)
+    case WPC_EXTBOARD3: /* WPC_ALPHA1HI */
+      if (core_gameData->hw.gameSpecific1 & WPC_PH) { // PH: lamps 129 .. 192 (data is row of 3rd matrix)
         core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0 + 128, wpc_data[WPC_LAMPCOLUMN], data, 8);
       }
-      if ((core_gameData->gen & GENWPC_HASDMD) == 0)
+      if ((core_gameData->gen & GENWPC_HASDMD) == 0) // WPC_ALPHA1HI
       {
         wpclocals.alphaSeg[wpc_data[WPC_ALPHAPOS]].b.hi |= data;
         core_write_pwm_output_8b(CORE_MODOUT_SEG0 + (wpc_data[WPC_ALPHAPOS] * 2 + 1) * 8, data);
@@ -945,12 +938,12 @@ WRITE_HANDLER(wpc_w) {
         core_write_pwm_output_8b(CORE_MODOUT_SOL0 + 16, data);
       coreGlobals.pulsedSolState = (coreGlobals.pulsedSolState & 0xFF00FFFF) | (data<<16);
       data |= wpc_data[offset];
-      if (core_gameData->hw.gameSpecific2 == WPC_CFTBL) // CFTBL chase lights
+      if (core_gameData->hw.gameSpecific1 & WPC_CFTBL) // CFTBL chase lights
       {
          int chase_2b = ((coreGlobals.pulsedSolState >> 22) & 2) | ((coreGlobals.pulsedSolState >> 19) & 1); // 2 bit decoder => select one of the 4 chase light strings
          int chase_gi = ((wpclocals.conductingGITriacs & 1) ? 0x0F : 0x00) | ((wpclocals.conductingGITriacs & 8) ? 0xF0 : 0x00); // GI outputs
-         if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_LAMPS | CORE_MODOUT_FORCE_ON))
-           core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 64, chase_gi & (0x11 << chase_2b));
+         wpclocals.conductingChaseLightTriacs |= chase_gi & (0x11 << chase_2b);
+         core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 64, wpclocals.conductingChaseLightTriacs);
          coreGlobals.lampMatrix[8] = coreGlobals.tmpLampMatrix[8] = 0x11 << chase_2b;
       }
       break;
@@ -960,55 +953,77 @@ WRITE_HANDLER(wpc_w) {
       coreGlobals.pulsedSolState = (coreGlobals.pulsedSolState & 0xFFFF00FF) | (data<<8);
       data |= wpc_data[offset];
       break;
-    case 0x3fd1-WPC_BASE:
+    case WPC_SND_S11_DATA1:
       //DBGLOG(("sdataX:%2x\n",data));
       if (core_gameData->gen & GEN_WPCALPHA_1) {
         sndbrd_0_data_w(0,data); sndbrd_0_ctrl_w(0,0); sndbrd_0_ctrl_w(0,1);
       }
       break;
-    case WPC_SOUNDIF:
+    case WPC_SND_DATA:
       //DBGLOG(("sdata:%2x\n",data));
       if (sndbrd_0_type() != SNDBRD_S11CS)
         sndbrd_0_data_w(0,data);
       break;
-    case WPC_SOUNDBACK:
+    case WPC_SND_CTRL:
       //DBGLOG(("sctrl:%2x\n",data));
       if (sndbrd_0_type() == SNDBRD_S11CS)
         { sndbrd_0_data_w(0,data); sndbrd_0_ctrl_w(0,1); }
       else sndbrd_0_ctrl_w(0,data);
       break;
-    case WPC_WATCHDOG:
-      //Increment irq count - This is the best way to know an IRQ was serviced as this register is written immediately during the IRQ code.
-      //Only do this if bit 8 is set, as WW_L5 sometimes writes 0x06 here during the interrupt code.
-      if(data & 0x80)
-      {
-        //Clear the IRQ now
+    case WPC_ZC_IRQ_ACK:
+      // Bit 7: IRQ ACK
+      if(data & 0x80) // IRQ acknowledge
         cpu_set_irq_line(WPC_CPUNO, M6809_IRQ_LINE, CLEAR_LINE);
-      }
+      // Bit 2: Periodic timer on IRQ enable
+      //  Noop as it is checked when interrupt is raised
+      // Bit 1(?): Watchdog reset (write only)
+      //  Noop as we do not have a watchdog here :)
       break;
-    case WPC_FIRQSRC:
-      /* CPU writes here after a non-dmd firq. Don't know what happens */
+    case WPC_HIGHRESTIMER:
+      // Ack previous high res timer FIRQ if any
+      if (wpclocals.wpcFIRQ != 0) {
+        wpclocals.wpcFIRQ = 0;
+        update_firq();
+      }
+      // Eventually starts a new timer from the given value. The clock frequency is a wild guess as schematic has a 32.768 kHz oscillator 
+      // and this makes the blinking in BOP service menu looks okish compared to this video: https://www.youtube.com/watch?v=wXY63U1mSZk.
+      if (data > 0)
+        timer_adjust(wpclocals.highres_timer, data / 32768., 0, 0.);
+      else if (timer_enabled(wpclocals.highres_timer))
+        timer_enable(wpclocals.highres_timer, 0);
+      // if (wpc_data[offset] != 0 || data != 0) printf("%8.5f High res timer: %02x\n", timer_get_time(), data);
       break;
     case WPC_IRQACK:
-//      cpu_set_irq_line(WPC_CPUNO, M6809_IRQ_LINE, CLEAR_LINE);
+      // cpu_set_irq_line(WPC_CPUNO, M6809_IRQ_LINE, CLEAR_LINE);
       DBGLOG(("WPC_IRQACK. PC=%04x d=%02x\n",activecpu_get_pc(), data));
       break;
-    case DMD_PAGE3000: /* set the page that is visible at 0x3000 */
-      cpu_setbank(4, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200); break;
-    case DMD_PAGE3200: /* set the page that is visible at 0x3200 */
-      cpu_setbank(5, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200); break;
-    case DMD_PAGE3400: /* set the page that is visible at 0x3400 */
-      cpu_setbank(6, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200); break;
-    case DMD_PAGE3600: /* set the page that is visible at 0x3600 */
-      cpu_setbank(7, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200); break;
-    case DMD_PAGE3800: /* set the page that is visible at 0x3800 */
-      cpu_setbank(2, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200); break;
-    case DMD_PAGE3A00: /* set the page that is visible at 0x3A00 */
-      cpu_setbank(3, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200); break;
-    case DMD_FIRQLINE: /* set the line to generate FIRQ at. */
-      wpc_firq(FALSE, WPC_FIRQ_DMD);
+    case WPC_DMD_PAGE3000: /* set the page that is accessed by CPU at 0x3000 (WPC-95 only) */
+      if (core_gameData->gen & (GEN_WPC95DCS | GEN_WPC95)) cpu_setbank(4, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200);
       break;
-    case DMD_VISIBLEPAGE: /* set the visible page */
+    case WPC_DMD_PAGE3200: /* set the page that is accessed by CPU at 0x3200 (WPC-95 only) */
+      if (core_gameData->gen & (GEN_WPC95DCS | GEN_WPC95)) cpu_setbank(5, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200);
+      break;
+    case WPC_DMD_PAGE3400: /* set the page that is accessed by CPU at 0x3400 (WPC-95 only) */
+      if (core_gameData->gen & (GEN_WPC95DCS | GEN_WPC95)) cpu_setbank(6, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200);
+      break;
+    case WPC_DMD_PAGE3600: /* set the page that is accessed by CPU at 0x3600 (WPC-95 only) */
+      if (core_gameData->gen & (GEN_WPC95DCS | GEN_WPC95)) cpu_setbank(7, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200);
+      break;
+    case WPC_DMD_PAGE3800: /* set the page that is accessed by CPU at 0x3800 */
+      cpu_setbank(2, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200);
+      break;
+    case WPC_DMD_PAGE3A00: /* set the page that is accessed by CPU at 0x3A00 */
+      cpu_setbank(3, memory_region(WPC_DMDREGION) + (data & 0x0f) * 0x200);
+      break;
+    case WPC_DMD_FIRQLINE: /* acknowledge raised DMD FIRQ if any, and set the line to generate the next FIRQ (0xFF to ack and disable) */
+      //printf("%8.5f FIRQ ROW: %02x PC: %04x\n", timer_get_time(), data, activecpu_get_pc());
+      if (dmdlocals.firq != 0) {
+        dmdlocals.firq = 0;
+        update_firq();
+      }
+      break;
+    case WPC_DMD_SHOWPAGE: /* set the page that will be rasterized after next DMD vblank */
+      //{ static double prev = 0.; printf("%8.5f Set page: %02x PC: %04x elapsed:%8.5f\n", timer_get_time(), data, activecpu_get_pc(), timer_get_time()-prev); prev = timer_get_time(); }
       break;
     case WPC_RTCHOUR:
     case WPC_RTCMIN:
@@ -1038,10 +1053,13 @@ WRITE_HANDLER(wpc_w) {
       }
       break;
     case WPC_SERIAL_DATA:
-      break;
     case WPC_SERIAL_CTRL:
-      break;
     case WPC_SERIAL_BAUD:
+#ifdef PINMAME_HOST_UART
+      if (pmoptions.serial_device != NULL) {
+        uart_8251_write(offset, data);
+      }
+#endif
       break;
     default:
       DBGLOG(("wpc_w %4x %2x\n", offset+WPC_BASE, data));
@@ -1105,7 +1123,9 @@ static void wpc_pic_w(int data) {
 /  Generate IRQ interrupt
 /--------------------------*/
 static INTERRUPT_GEN(wpc_irq) {
-  cpu_set_irq_line(WPC_CPUNO, M6809_IRQ_LINE, HOLD_LINE);
+  // Only raise line if periodic IRQ is enabled on WPC chip
+  if (wpc_data[WPC_ZC_IRQ_ACK] & 0x04)
+    cpu_set_irq_line(WPC_CPUNO, M6809_IRQ_LINE, HOLD_LINE);
 }
 
 static SWITCH_UPDATE(wpc) {
@@ -1133,8 +1153,11 @@ static SWITCH_UPDATE(wpc) {
 #endif
 }
 
-static WRITE_HANDLER(snd_data_cb) { // WPCS sound generates FIRQ on reply
-  wpc_firq(TRUE, WPC_FIRQ_SOUND);
+static WRITE_HANDLER(snd_data_cb) { // Pre DCS sound board A-12738 may generate FIRQ on data ready if W1 jumper is soldered
+  if (wpclocals.sndFIRQ != 1) {
+    wpclocals.sndFIRQ = 1;
+    update_firq();
+  }
 }
 
 static MACHINE_INIT(wpc) {
@@ -1143,6 +1166,8 @@ static MACHINE_INIT(wpc) {
   const size_t romLength = memory_region_length(WPC_ROMREGION);
 
   memset(&wpclocals, 0, sizeof(wpclocals));
+
+  wpclocals.highres_timer = timer_alloc(wpc_highres_timer);
 
   // map dmd banks to standard ram for games that don't use it
   cpu_setbank(4, memory_region(WPC_CPUREGION) + 0x3000);
@@ -1157,14 +1182,17 @@ static MACHINE_INIT(wpc) {
     case GEN_WPCALPHA_2:
     case GEN_WPCDMD:
     case GEN_WPCFLIPTRON:
-      sndbrd_0_init(SNDBRD_WPCS, 1, memory_region(WPCS_ROMREGION),snd_data_cb,NULL);
+      // Pre DCS sound board A-12738 may generate a FIRQ on data ready if W1 jumper is soldered, but so far, I didn't find any game with W1 soldered
+      // and inspected gamecode only managed FIRQ coming from WPC or DMD. Moreover, if enabling, this would break the DMD timing as the gamecode
+      // would mistakenly consider sound a FIRQ as a DMD FIRQ, breaking display during score in lots of games.
+      sndbrd_0_init(SNDBRD_WPCS, 1, memory_region(WPCS_ROMREGION), NULL /*snd_data_cb*/, NULL);
       break;
     case GEN_WPCDCS:
     case GEN_WPCSECURITY:
       sndbrd_0_init(SNDBRD_DCS, 1, memory_region(DCS_ROMREGION),NULL,NULL);
       break;
     case GEN_WPC95:
-      //WPC95 only controls 3 of the 5 Triacs, the other 2 are ALWAYS ON (power wired directly)
+      // WPC95 only controls 3 of the 5 Triacs, the other 2 are ALWAYS ON (power wired directly)
       //  We simulate this here by setting the bits to simulate full intensity immediately at power up.
       wpc_data[WPC_GILAMPS] = 0x18;
       coreGlobals.gi[CORE_MAXGI-2] = 8;
@@ -1174,10 +1202,42 @@ static MACHINE_INIT(wpc) {
       sndbrd_0_init(core_gameData->gen == GEN_WPC95DCS ? SNDBRD_DCS : SNDBRD_DCS95, 1, memory_region(DCS_ROMREGION),NULL,NULL);
   }
 
+  // Init DMD PWM shading
+  if (core_gameData->gen & (GEN_WPCDMD | GEN_WPCFLIPTRON | GEN_WPCDCS | GEN_WPCSECURITY | GEN_WPC95DCS | GEN_WPC95))
+  {
+    const int isPH = (core_gameData->hw.gameSpecific1 & WPC_PH);
+    core_dmd_pwm_init(&dmdlocals.pwm_state, 128, isPH ? 64 : 32, isPH ? CORE_DMD_PWM_FILTER_WPC_PH : CORE_DMD_PWM_FILTER_WPC, isPH ? CORE_DMD_PWM_COMBINER_SUM_2 : CORE_DMD_PWM_COMBINER_SUM_3);
+    dmdlocals.pwm_state.revByte = 1;
+  }
+
+#ifdef PINMAME_HOST_UART
+  if (pmoptions.serial_device != NULL) {
+    uart_16c450_reset();
+    uart_8251_reset();
+
+    // use default baud rate; game will set a baud rate at startup
+    if (uart_open(pmoptions.serial_device, 9600) < 0) {
+      printf("serial_device: failed to open %s.\n", pmoptions.serial_device);
+      pmoptions.serial_device = NULL;       // open failed, disable UART
+    }
+    else {
+      printf("serial_device: WPC serial port redirected to %s.\n", pmoptions.serial_device);
+    }
+  }
+#endif
+
   // Initialize outputs
   coreGlobals.nLamps = 64 + core_gameData->hw.lampCol * 8;
   core_set_pwm_output_type(CORE_MODOUT_LAMP0, coreGlobals.nLamps, CORE_MODOUT_BULB_44_18V_DC_WPC);
   coreGlobals.nSolenoids = CORE_FIRSTCUSTSOL - 1 + core_gameData->hw.custSol; // Auxiliary solenoid board adding 8 outputs are already included in the base solenoid span (see core_gelAllModSol) (WPC Fliptronics: TZ / WPC DCS: DM, IJ, STTNG / WPC Security : RS / WPC 95: NGG)
+  if (core_gameData->gen & (GENWPC_HASFLIPTRON | GENWPC_HASWPC95))
+  {
+    coreGlobals.flipperCoils = 0x21232D2F20222C2Eull; // Hold: 33/35/45/47 Pow: 32/34/44/46 sol number is 0 based (offset from SOL0), order is UR/UL/LR/LL
+    if ((core_gameData->hw.flippers & FLIP_SOL(FLIP_UR)) == 0) /* No upper right flipper */
+      coreGlobals.flipperCoils |= 0xFF000000FF000000ull;
+    if ((core_gameData->hw.flippers & FLIP_SOL(FLIP_UL)) == 0) /* No upper left flipper */
+      coreGlobals.flipperCoils |= 0x00FF000000FF0000ull;
+  }
   core_set_pwm_output_type(CORE_MODOUT_SOL0, coreGlobals.nSolenoids, CORE_MODOUT_SOL_2_STATE);
   coreGlobals.nGI = 5;
   core_set_pwm_output_type(CORE_MODOUT_GI0, coreGlobals.nGI, CORE_MODOUT_BULB_44_6_3V_AC);
@@ -1194,195 +1254,209 @@ static MACHINE_INIT(wpc) {
   // - Ticket Tac Toe
   // - Phantom Haus
   // - Rush
-  if (strncasecmp(gn, "afm_113", 7) == 0) { // Attack from Mars
+  if (strncasecmp(gn, "afm_", 4) == 0) { // Attack from Mars
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 8 * 8, 16, CORE_MODOUT_LED); // Auxiliary LEDs driven through solenoids 37/38
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 39 - 1, 1, CORE_MODOUT_LED); // Xenon strobe light (crudely considered as a LED since it is meant to flicker)
   }
-  else if (strncasecmp(gn, "bop_l7", 6) == 0) { // The Machine: Bride of the Pinbot
-     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
-     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "bop_", 4) == 0) { // The Machine: Bride of the Pinbot
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
      // FIXME this is likely incorrect: I don't have the wiring for the helmet bulbs so they are defined like underpower #44 but this is very unlikely to be true (these are #555 but the power maybe from GI line 2 
      core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 8 * 8, 16, CORE_MODOUT_BULB_44_5_7V_AC); // Helmet lights
   }
-  else if (strncasecmp(gn, "br_l4", 5) == 0) { // Black Rose
+  else if (strncasecmp(gn, "br_", 3) == 0) { // Black Rose
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "cc_13", 5) == 0) { // Cactus Canyon
+  else if (strncasecmp(gn, "cc_", 3) == 0) { // Cactus Canyon
      static const int flashers[] = { 18, 19, 20, 24, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "corv_21", 7) == 0) { // Corvette
+  else if (strncasecmp(gn, "corv_", 5) == 0) { // Corvette
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "cp_16", 5) == 0) { // The Champion Pub
+  else if (strncasecmp(gn, "cp_", 3) == 0) { // The Champion Pub
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
      // Auxiliary LEDs driven through solenoids 37/38/39/40, only 24 (2x12 on each side) of the 32 outputs are used by the game (board A-21967)
      core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 8 * 8, 32, CORE_MODOUT_LED);
   }
-  else if (strncasecmp(gn, "cv_14", 5) == 0) { // Cirqus Voltaire
+  else if (strncasecmp(gn, "cv_", 3) == 0) { // Cirqus Voltaire
      static const int flashers[] = { 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "cftbl_l4", 8) == 0) { // Creature From The Black Lagoon
-     static const int flashers[] = { 2, 8, 9, 10, 11, 16, 17, 18, 19, 22, 25, 28 }; // 28 is hologram lamp
+  else if (strncasecmp(gn, "cftbl_", 6) == 0) { // Creature From The Black Lagoon
+     static const int flashers[] = { 2, 8, 9, 10, 11, 16, 17, 18, 19, 22, 25, 28, 33, 34, 35, 36 }; // 28 is hologram lamp, 33-36 are flashers inside backglass using Fliptronic upper flippers (not mentionned in manual)
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+		 core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 64, 8, CORE_MODOUT_BULB_86_6_3V_AC); // chase lights (8 strings of #86 bulbs wired between GI and solenoids outputs through triacs and a 2 bit decoder)
   }
-  else if (strncasecmp(gn, "congo_21", 8) == 0) { // Congo
+  else if (strncasecmp(gn, "congo_", 6) == 0) { // Congo
      static const int flashers[] = { 17, 18, 19, 20, 21, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "dh_lx2", 6) == 0) { // Dirty Harry
+  else if (strncasecmp(gn, "dh_", 3) == 0) { // Dirty Harry
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "dm_lx4", 6) == 0) { // Demolition Man
-     static const int flashers[] = { 17, 21, 22, 23, 24, 25, 26, 27, 28, 37 + 14, 38 + 14, 39 + 14, 40 + 14, 41 + 14, 42 + 14, 43 + 14, 44 + 14 };
+  else if (strncasecmp(gn, "dm_", 3) == 0) { // Demolition Man
+     static const int flashers[] = { 17, 21, 22, 23, 24, 25, 26, 27, 28, 37 + 14, 38 + 14, 39 + 14, 40 + 14, 41 + 14, 42 + 14, 43 + 14, 44 + 14 }; // Aux Driver board
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "drac_l1", 7) == 0) { // Bram Stoker's Dracula
-     static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24, 26 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "drac_", 5) == 0) { // Bram Stoker's Dracula
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 8, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 24 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 26 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC); // Backbox
   }
-  else if (strncasecmp(gn, "dw_l2", 5) == 0) { // Doctor Who
+  else if (strncasecmp(gn, "dw_", 3) == 0) { // Doctor Who
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "fh_l9", 5) == 0) { // Fun House
+  else if (strncasecmp(gn, "fh_", 3) == 0) { // Fun House
      static const int flashers[] = { 17, 18, 19, 20, 23, 24 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "fs_lx5", 6) == 0) { // The Flintstones
+  else if (strncasecmp(gn, "fs_", 3) == 0) { // The Flintstones
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 6, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 24 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "ft_l5", 5) == 0) { // Fish Tales
-     static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 25, 26, 27 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "ft_", 3) == 0) { // Fish Tales
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 7, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "gi_l9", 5) == 0) { // Gilligan's Island
+  else if (strncasecmp(gn, "gi_", 3) == 0) { // Gilligan's Island
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "gw_l5", 5) == 0) { // High Speed II: The Getaway
+  else if (strncasecmp(gn, "gw_", 3) == 0) { // High Speed II: The Getaway
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
   }
-  else if ((strncasecmp(gn, "hd_l3", 5) == 0) // Harley Davidson
+  else if ((strncasecmp(gn, "hd_", 3) == 0) // Harley Davidson
         || (strncasecmp(gn, "che_cho", 7) == 0)) { // Cheech & Chong: Road-Trip'pin
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "hshot_p8", 8) == 0) { // Hot Shot
+  else if (strncasecmp(gn, "hshot_", 6) == 0) { // Hot Shot
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "hurr_l2", 7) == 0) { // Hurricane
+  else if (strncasecmp(gn, "hurr_", 5) == 0) { // Hurricane
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 12, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "i500_11r", 8) == 0) { // Indy 500
+  else if (strncasecmp(gn, "i500_", 5) == 0) { // Indy 500
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 14 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 10, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "ij_l7", 5) == 0) { // Indiana Jones
-     static const int flashers[] = { 17, 18, 19, 20, 21, 25, 26, 27, 37 + 14, 38 + 14, 39 + 14, 40 + 14, 41 + 14 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
-	 core_set_pwm_output_type(CORE_MODOUT_SOL0 + 24 - 1, 1, CORE_MODOUT_LED); // Plane Guns LED
+  else if (strncasecmp(gn, "ij_", 3) == 0) { // Indiana Jones
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 8, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 37 + 14 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC); // Aux Driver board
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 24 - 1, 1, CORE_MODOUT_LED); // Plane Guns LED
   }
-  else if (strncasecmp(gn, "jb_10r", 6) == 0) { // Jack Bot
+  else if (strncasecmp(gn, "jb_", 3) == 0) { // Jack Bot
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 15 - 1, 10, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "jd_l7", 5) == 0) { // Judge Dredd
+  else if (strncasecmp(gn, "jd_", 3) == 0) { // Judge Dredd
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "jm_12r", 6) == 0) { // Johnny Mnemonic
+  else if (strncasecmp(gn, "jm_", 3) == 0) { // Johnny Mnemonic
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "jy_12", 5) == 0) { // Junk Yard
+  else if (strncasecmp(gn, "jy_", 3) == 0) { // Junk Yard
      static const int flashers[] = { 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "mb_10", 5) == 0) { // Monster Bash
-     static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24, 25, 26 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "mb_", 3) == 0) { // Monster Bash
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 10, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "mm_10", 5) == 0) { // Medieval Madness
+  else if (strncasecmp(gn, "mm_", 3) == 0) { // Medieval Madness
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 23, 24, 25 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "nbaf_31", 7) == 0) { // NBA Fast Break
+  else if (strncasecmp(gn, "nbaf_", 5) == 0) { // NBA Fast Break
      static const int flashers[] = { 17, 19, 20, 22, 23, 24 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "nf_23x", 6) == 0) { // No Fear
-     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 11, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "nf_", 3) == 0) { // No Fear
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 2, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 2, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 24 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 26 - 1, 2, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "ngg_13", 6) == 0) { // No Good Goofers
-     static const int flashers[] = { 17, 18, 19, 20, 21, 25, 26, 42 + 14, 43 + 14, 44 + 14, 45 + 14, 46 + 14, 47 + 14, 48 + 14, 49 + 14 };
+  else if (strncasecmp(gn, "ngg_", 4) == 0) { // No Good Goofers
+     static const int flashers[] = { 17, 18, 19, 20, 21, 25, 26, 42 + 14, 43 + 14, 44 + 14, 45 + 14, 46 + 14, 47 + 14, 48 + 14, 49 + 14 }; // Aux Driver board
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "pop_lx5", 7) == 0) { // Popeye Save The Earth
+  else if (strncasecmp(gn, "pop_", 4) == 0) { // Popeye Save The Earth
      static const int flashers[] = { 18, 19, 20, 21, 22, 23, 24, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "pz_f4", 5) == 0) { // Party Zone
+  else if (strncasecmp(gn, "pz_", 3) == 0) { // Party Zone
      static const int flashers[] = { 17, 18, 19, 20, 21, 22, 25, 26, 27, 28 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "rs_l6", 5) == 0) { // Road Show
-     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 37 + 14 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "rs_", 3) == 0) { // Road Show
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 37 + 14 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC); // Aux Driver board
   }
-  else if (strncasecmp(gn, "sc_18s11", 8) == 0) { // Safe Cracker
+  else if (strncasecmp(gn, "sc_", 3) == 0) { // Safe Cracker
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
      // A-20909: 48 bulbs switched through solenoids 37..40, powered from GI string 2/4/5
      // FIXME not yet fully emulated (only the on/off switch is emulated, needing to be crossed with the GI string at the bulb level)
      core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 8 * 8, 48, CORE_MODOUT_BULB_44_6_3V_AC);
   }
-  else if (strncasecmp(gn, "sf_l1", 5) == 0) { // SlugFest
+  else if (strncasecmp(gn, "sf_", 3) == 0) { // SlugFest
      static const int flashers[] = { 17, 18, 19, 20, 25, 26 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "ss_15", 5) == 0) { // Scared Stiff
+  else if (strncasecmp(gn, "ss_", 3) == 0) { // Scared Stiff
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 12, CORE_MODOUT_BULB_89_20V_DC_WPC);
-     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 35 + 14 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC); // Lower left/lower right flasher (use free flipper sols)
-     core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 8 * 8, 16, CORE_MODOUT_LED); // Auxiliary LEDs driven through solenoids 37/38 (Crate eyes)
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 35 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC); // Lower left/lower right flasher (use free upper flipper sol outputs)
+     core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 8 * 8, 16, CORE_MODOUT_LED); // 16 auxiliary Skull LEDs driven through solenoids 37/38 (only used in prototype 0.1, removed for later prototype and production builds)
   }
-  else if (strncasecmp(gn, "sttng_l7", 8) == 0) { // Star Trek Next Generation
-     static const int flashers[] = { 20, 21, 22, 23, 24, 25, 26, 27, 28, 41 + 14, 42 + 14 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "sttng_", 6) == 0) { // Star Trek Next Generation
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 2, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 26 - 1, 3, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 41 + 14 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC); // Aux Driver board
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 42 + 14 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "totan_14", 8) == 0) { // Tales Of The Arabian Nights
-     static const int flashers[] = { 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "totan_", 6) == 0) { // Tales Of The Arabian Nights
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 16 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 2, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 22 - 1, 7, CORE_MODOUT_BULB_906_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "taf_l5", 6) == 0) { // The Addams Family
+  else if (strncasecmp(gn, "taf_", 4) == 0) { // The Addams Family
      static const int flashers[] = { 17, 18, 19, 20, 21, 22 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
@@ -1390,38 +1464,39 @@ static MACHINE_INIT(wpc) {
      // core_set_pwm_output_type(CORE_MODOUT_SOL0 + 16 - 1, 1, CORE_MODOUT_MAGNET);
      // core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 2, CORE_MODOUT_MAGNET);
   }
-  else if (strncasecmp(gn, "tafg_lx3", 8) == 0) { // The Addams Family Gold Edition
+  else if (strncasecmp(gn, "tafg_", 5) == 0) { // The Addams Family Gold Edition
      static const int flashers[] = { 17, 18, 19, 20, 21, 22 };
      for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "tom_13", 6) == 0) { // Theatre of Magic
+  else if (strncasecmp(gn, "tom_", 4) == 0) { // Theatre of Magic
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 24 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "ts_lx5", 6) == 0) { // The Shadow
+  else if (strncasecmp(gn, "ts_", 3) == 0) { // The Shadow
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 26 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "tz_92", 5) == 0) { // Twilight Zone
-     static const int flashers[] = { 17, 18, 19, 20, 28, 37 + 14, 38 + 14, 39 + 14, 40 + 14, 41 + 14 };
-     for (int i = 0; i < sizeof(flashers) / sizeof(int); i++)
-		core_set_pwm_output_type(CORE_MODOUT_SOL0 + flashers[i] - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "tz_", 3) == 0) { // Twilight Zone
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 4, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 37 + 14 - 1, 5, CORE_MODOUT_BULB_906_20V_DC_WPC); // Aux Driver board
   }
-  else if (strncasecmp(gn, "t2_l8", 5) == 0) { // Terminator 2
-     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 11, CORE_MODOUT_BULB_89_20V_DC_WPC);
+  else if (strncasecmp(gn, "t2_", 3) == 0) { // Terminator 2
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
+     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 10, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "wcs_l2", 6) == 0) { // World Cup Soccer
+  else if (strncasecmp(gn, "wcs_", 4) == 0) { // World Cup Soccer
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 22 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "wd_12", 5) == 0) { // Who Dunnit
+  else if (strncasecmp(gn, "wd_", 3) == 0) { // Who Dunnit
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 14 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(gn, "ww_l5", 5) == 0) { // White Water
+  else if (strncasecmp(gn, "ww_", 3) == 0) { // White Water
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 15 - 1, 10, CORE_MODOUT_BULB_89_20V_DC_WPC);
      // FIXME The right bulb here would be #194 (12V x 0.27A = 4W, so more or less half of #89) wired directly through a 2N6427 between +12V DC and ground
      core_set_pwm_output_bulb(CORE_MODOUT_LAMP0 + 8 * 8, 16, BULB_89, 13.0, FALSE, 0.0, 1.0);
@@ -1440,7 +1515,7 @@ static MACHINE_INIT(wpc) {
          memory_region(WPC_ROMREGION) + romLength - 0x8000, 0x8000);
 
   /*-- sync counter with vblank --*/
-  wpclocals.vblankCount = 1;
+  wpclocals.interfaceUpdateCount = 1;
 
   coreGlobals.swMatrix[2] |= 0x08; /* Always closed switch */
 
@@ -1463,6 +1538,8 @@ static MACHINE_INIT(wpc) {
 
 static MACHINE_STOP(wpc) {
   sndbrd_0_exit();
+  if (core_gameData->gen & (GEN_WPCDMD | GEN_WPCFLIPTRON | GEN_WPCDCS | GEN_WPCSECURITY | GEN_WPC95DCS | GEN_WPC95))
+      core_dmd_pwm_exit(&dmdlocals.pwm_state);
   if (wpc_printfile)
     { mame_fclose(wpc_printfile); wpc_printfile = NULL; }
 }
@@ -1522,94 +1599,53 @@ static void wpc_serialCnv(const char no[21], UINT8 pic[16], UINT8 code[3]) {
 /* Williams WPC 128x32 DMD Handling */
 /*----------------------------------*/
 static VIDEO_START(wpc_dmd) {
-  UINT8 *RAM = memory_region(WPC_DMDREGION);
-  int ii;
-
-  for (ii = 0; ii < DMD_FRAMES; ii++)
-    dmdlocals.DMDFrames[ii] = RAM;
-  dmdlocals.nextDMDFrame = 0;
+  memset(&dmdlocals, 0, sizeof(dmdlocals));
   return 0;
 }
 
-PINMAME_VIDEO_UPDATE(wpcdmd_update) {
-  int ii,kk;
-
-#if defined(VPINMAME) || defined(LIBPINMAME)
-  g_raw_gtswpc_dmdframes = DMD_FRAMES;
-#endif
-
-  /* Create a temporary buffer with all pixels */
-  for (kk = 0, ii = 1; ii < 33; ii++) {
-    UINT8 *line = &coreGlobals.dotCol[ii][0];
-    int jj;
-    for (jj = 0; jj < 16; jj++) {
-      /* Intensity depends on how many times the pixel */
-      /* been on in the last DMD_FRAMES frames         */
-      const unsigned int intens1 = ((dmdlocals.DMDFrames[0][kk] & 0x55) +
-                                    (dmdlocals.DMDFrames[1][kk] & 0x55) +
-                                    (dmdlocals.DMDFrames[2][kk] & 0x55));
-      const unsigned int intens2 = ((dmdlocals.DMDFrames[0][kk] & 0xaa) +
-                                    (dmdlocals.DMDFrames[1][kk] & 0xaa) +
-                                    (dmdlocals.DMDFrames[2][kk] & 0xaa));
-
-#if defined(VPINMAME) || defined(LIBPINMAME)
-      g_raw_gtswpc_dmd[kk        ] = dmdlocals.DMDFrames[0][kk];
-      g_raw_gtswpc_dmd[kk + 0x200] = dmdlocals.DMDFrames[1][kk];
-      g_raw_gtswpc_dmd[kk + 0x400] = dmdlocals.DMDFrames[2][kk];
-#endif
-
-      *line++ =  intens1     & 0x03;
-      *line++ = (intens2>>1) & 0x03;
-      *line++ = (intens1>>2) & 0x03;
-      *line++ = (intens2>>3) & 0x03;
-      *line++ = (intens1>>4) & 0x03;
-      *line++ = (intens2>>5) & 0x03;
-      *line++ = (intens1>>6) & 0x03;
-      *line++ = (intens2>>7) & 0x03;
-
-      kk++;
-    }
-    *line = 0; /* to simplify antialiasing */
+// The DMD controller constantly rasterizes the content of a page of RAM (while 
+// CPU prepare next frame in another page).
+// 
+// It is driven by the main CPU clock at 2MHz and uses freq dividers to generate
+// all timings. In the end, pages are rasterized at 2MHz / (128*32*2*2) = 122.07Hz
+// where the first 2 dividers are the dot clock divider and the second is the 
+// VBlank divider. All of this was deduced from the pre WPC-95 schematics.
+// lucky1 measured on a real machine 122.1Hz which validates it.
+//
+// WPC games uses either a 2 or 3 frame PWM pattern to create 0/50/100 or 0/33/66/100 shades.
+// For Phantom Haus, the DMD is bigger with 64 rows instead of 32, therefore
+// the rasterizer timings are 2MHz / (128*64*2*2) = 61.04Hz. The PWM pattern 
+// used is therefore limited to 2 frames (30.5Hz) with 0/50/100 shades to avoid 
+// flickering.
+// 
+// CPU may ask the DMD board to raise FIRQ when a given row is reached.
+// The FIRQ is then acked (pulled down) by writing again the requested FIRQ row 
+// to the corresponding register (game code use 0xFF to disables DMD FIRQ).
+static void wpc_dmd_hsync(int param) {
+  dmdlocals.row = (dmdlocals.row + 1) % dmdlocals.pwm_state.height; // FIXME Phantom Haus uses the same AV card than other WPC95 but with a 64 row display, therefore the CPU must tell the rasterizer that it is 64 row high somewhere we don't know
+  if (dmdlocals.row == 0) { // VSYNC
+    // Rasterize next page (latched while rasterizing the previous page)
+    const int rasterizedPage = wpc_data[WPC_DMD_SHOWPAGE] & 0x0f;
+    //printf("%8.5f Rnd page: %02x\n", timer_get_time(), rasterizedPage);
+    core_dmd_submit_frame(&dmdlocals.pwm_state, memory_region(WPC_DMDREGION) + rasterizedPage * dmdlocals.pwm_state.rawFrameSize, 1);
+    #ifdef PROC_SUPPORT
+      if (coreGlobals.p_rocEn) /* looks like P-ROC uses the last 3 subframes sent rather than the first 3 */
+        procFillDMDSubFrame(dmd_state->frame_index % 3, memory_region(WPC_DMDREGION) + rasterizedPage * dmdlocals.pwm_state.rawFrameSize, dmdlocals.pwm_state.rawFrameSize);
+      /* Don't explicitly update the DMD from here. The P-ROC code will update after the next DMD event. */
+    #endif
   }
-  video_update_core_dmd(bitmap, cliprect, layout);
-  return 0;
-}
-
-PINMAME_VIDEO_UPDATE(wpcdmd_update64) {
-  int ii,kk;
-
-  // Phantom Haus can only use 3 brightness levels (off and 2 on states)
-#if defined(VPINMAME) || defined(LIBPINMAME)
-  g_raw_gtswpc_dmdframes = 2;
-#endif
-
-  for (kk = 0, ii = 1; ii < 65; ii++) {
-    UINT8 *line = &coreGlobals.dotCol[ii][0];
-    int jj;
-    for (jj = 0; jj < 16; jj++) {
-      const unsigned int intens1 = ((dmdlocals.DMDFrames[0][kk] & 0x55) +
-                                    (dmdlocals.DMDFrames[1][kk] & 0x55));
-      const unsigned int intens2 = ((dmdlocals.DMDFrames[0][kk] & 0xaa) +
-                                    (dmdlocals.DMDFrames[1][kk] & 0xaa));
-
-#if defined(VPINMAME) || defined(LIBPINMAME)
-      g_raw_gtswpc_dmd[kk]         = dmdlocals.DMDFrames[0][kk];
-      g_raw_gtswpc_dmd[kk + 0x200] = dmdlocals.DMDFrames[1][kk];
-#endif
-
-      *line++ =  intens1    &3 ?  (intens1    &3) + 1 : 0;
-      *line++ = (intens2>>1)&3 ? ((intens2>>1)&3) + 1 : 0;
-      *line++ = (intens1>>2)&3 ? ((intens1>>2)&3) + 1 : 0;
-      *line++ = (intens2>>3)&3 ? ((intens2>>3)&3) + 1 : 0;
-      *line++ = (intens1>>4)&3 ? ((intens1>>4)&3) + 1 : 0;
-      *line++ = (intens2>>5)&3 ? ((intens2>>5)&3) + 1 : 0;
-      *line++ = (intens1>>6)&3 ? ((intens1>>6)&3) + 1 : 0;
-      *line++ = (intens2>>7)&3 ? ((intens2>>7)&3) + 1 : 0;
-
-      kk++;
-    }
-    *line = 0;
+  if (dmdlocals.row == wpc_data[WPC_DMD_FIRQLINE] && dmdlocals.firq != 1) {
+    //printf("%8.5f FIRQ at row %02x\n", timer_get_time(), dmdlocals.row);
+    dmdlocals.firq = 1;
+    update_firq();
   }
-  video_update_core_dmd(bitmap, cliprect, layout);
+}
+
+int wpcdmd_update(int height, struct mame_bitmap* bitmap, const struct rectangle* cliprect, const struct core_dispLayout* layout) {
+  core_dmd_update_pwm(&dmdlocals.pwm_state);
+  core_dmd_video_update(bitmap, cliprect, layout, &dmdlocals.pwm_state);
   return 0;
 }
+
+PINMAME_VIDEO_UPDATE(wpcdmd_update32) { return wpcdmd_update(32, bitmap, cliprect, layout); }
+PINMAME_VIDEO_UPDATE(wpcdmd_update64) { return wpcdmd_update(64, bitmap, cliprect, layout); }

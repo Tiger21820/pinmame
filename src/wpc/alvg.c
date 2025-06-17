@@ -394,7 +394,7 @@ void UpdateLampCol(void) {
    Second, it writes the lamp column data first, then the lamp data itself.
    The other games write the lamp data first, then the lamp column data. - */
 WRITE_HANDLER(u14_porta_w) {
-	if (core_gameData->hw.gameSpecific1)
+	if (core_gameData->hw.gameSpecific1 == 1)
 		alvglocals.lampColumn = (alvglocals.lampColumn&0x0f01) | ((data & 0x7f)<<1);
 	else {
 		alvglocals.lampColumn = (alvglocals.lampColumn&0x0f80) | (data & 0x7f);
@@ -403,7 +403,7 @@ WRITE_HANDLER(u14_porta_w) {
 	//printf("LAMP STROBE(1-7):  data = %x\n",data&0x7f);
 }
 WRITE_HANDLER(u14_portb_w) {
-	if (core_gameData->hw.gameSpecific1)
+	if (core_gameData->hw.gameSpecific1 == 1)
 		alvglocals.lampColumn = (alvglocals.lampColumn&0x00fe) | ((data & 0x0f)<<8) | ((data & 0x10)>>4);
 	else {
 		alvglocals.lampColumn = (alvglocals.lampColumn&0x007f) | ((data & 0x1f)<<7);
@@ -413,7 +413,7 @@ WRITE_HANDLER(u14_portb_w) {
 }
 WRITE_HANDLER(u14_portc_w) {
 	alvglocals.lampRow = data;
-	if (core_gameData->hw.gameSpecific1)
+	if (core_gameData->hw.gameSpecific1 == 1)
 		UpdateLampCol();
 	//printf("LAMP RETURN: data = %x\n",data);
 }
@@ -525,9 +525,9 @@ static INTERRUPT_GEN(alvg_vblank) {
   alvglocals.vblankCount++;
 
   /*-- lamps --*/
-  memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+  memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
   if ((alvglocals.vblankCount % ALVG_LAMPSMOOTH) == 0) {
-    memset(coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
+    memset((void*)coreGlobals.tmpLampMatrix, 0, sizeof(coreGlobals.tmpLampMatrix));
   }
   /*-- solenoids --*/
   if ((alvglocals.vblankCount % ALVG_SOLSMOOTH) == 0) {
@@ -615,6 +615,8 @@ static MACHINE_INIT(alvg) {
   install_mem_write_handler(0, 0x2c00, 0x2c00, LED_LATCH);
   install_mem_write_handler(0, 0x2c80, 0x2c83, LED_DATA);
 }
+
+// Al's Garage Band (PCA020 DMD driver board)
 static MACHINE_INIT(alvgdmd1) {
   init_common();
   /* Init the dmd board */
@@ -622,22 +624,13 @@ static MACHINE_INIT(alvgdmd1) {
   sndbrd_1_init(core_gameData->hw.display,    ALVGDMD_CPUNO, memory_region(ALVGDMD_ROMREGION),data_from_dmd,NULL);
 }
 
-//Pistol Poker
+// Pistol Poker & Mystery Castle (PCA020A DMD driver board)
 static MACHINE_INIT(alvgdmd2) {
   init_common();
   /* Init the dmd board */
   install_mem_write_handler(0, 0x2c00, 0x2fff, DMD_LATCH);
   sndbrd_1_init(core_gameData->hw.display,    ALVGDMD_CPUNO, memory_region(ALVGDMD_ROMREGION),data_from_dmd,NULL);
 }
-
-//Mystery Castle, exactly same as Pistol Poker, but different clock rate
-static MACHINE_INIT(alvgdmd3) {
-  init_common();
-  /* Init the dmd board */
-  install_mem_write_handler(0, 0x2c00, 0x2fff, DMD_LATCH);
-  sndbrd_1_init(core_gameData->hw.display,    ALVGDMD_CPUNO, memory_region(ALVGDMD_ROMREGION),data_from_dmd,NULL);
-}
-
 
 static MACHINE_STOP(alvg) {
   sndbrd_0_exit();
@@ -725,25 +718,19 @@ MACHINE_DRIVER_END
 
 extern void construct_alvgdmd1(struct InternalMachineDriver *machine); // workaround to fix confusion in the linker, as this is defined in alvgdmd.c
 extern void construct_alvgdmd2(struct InternalMachineDriver *machine);
-extern void construct_alvgdmd3(struct InternalMachineDriver *machine);
 
-//Main CPU, DMD, Sound hardware Driver (Generation #2)
+//Main CPU, DMD (Generation #1: part PCA020), Sound hardware Driver (Generation #2)
 MACHINE_DRIVER_START(alvgs2dmd1)
   MDRV_IMPORT_FROM(alvgs2)
   MDRV_IMPORT_FROM(alvgdmd1)
   MDRV_CORE_INIT_RESET_STOP(alvgdmd1,NULL,alvg)
 MACHINE_DRIVER_END
 
+//Main CPU, DMD (Generation #2: part PCA020A), Sound hardware Driver (Generation #2)
 MACHINE_DRIVER_START(alvgs2dmd2)
   MDRV_IMPORT_FROM(alvgs2)
   MDRV_IMPORT_FROM(alvgdmd2)
   MDRV_CORE_INIT_RESET_STOP(alvgdmd2,NULL,alvg)
-MACHINE_DRIVER_END
-
-MACHINE_DRIVER_START(alvgs2dmd3)
-  MDRV_IMPORT_FROM(alvgs2)
-  MDRV_IMPORT_FROM(alvgdmd3)
-  MDRV_CORE_INIT_RESET_STOP(alvgdmd3,NULL,alvg)
 MACHINE_DRIVER_END
 
 //Use only to test 8031 core

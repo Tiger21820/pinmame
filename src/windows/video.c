@@ -5,7 +5,20 @@
 //============================================================
 
 // standard windows headers
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#if _MSC_VER >= 1800
+ // Windows 2000 _WIN32_WINNT_WIN2K
+ #define _WIN32_WINNT 0x0500
+#elif _MSC_VER < 1600
+ #define _WIN32_WINNT 0x0400
+#else
+ #define _WIN32_WINNT 0x0403
+#endif
+#define WINVER _WIN32_WINNT
+#endif
 #include <windows.h>
 #ifndef DISABLE_DX7
  #include <ddraw.h>
@@ -199,12 +212,11 @@ struct rc_option video_opts[] =
 #ifdef VPINMAME
 	// default window mode for VPM is run inside a window
 	{ "window", "w", rc_bool, &win_window_mode, "1", 0, 0, NULL, "run in a window/run on full screen" },
-	{ "ddraw", "dd", rc_bool, &win_use_ddraw, "0", 0, 0, NULL, "use DirectDraw for rendering" },
 #else
 	// default window mode for PinMAME is full screen
 	{ "window", "w", rc_bool, &win_window_mode, "0", 0, 0, NULL, "run in a window/run on full screen" },
-	{ "ddraw", "dd", rc_bool, &win_use_ddraw, "0", 0, 0, NULL, "use DirectDraw for rendering" },
 #endif
+	{ "ddraw", "dd", rc_bool, &win_use_ddraw, "0", 0, 0, NULL, "use DirectDraw for rendering" },
 	{ "direct3d", "d3d", rc_bool, &win_use_d3d, "0", 0, 0, NULL, "use Direct3D for rendering" },
 	{ "hwstretch", "hws", rc_bool, &win_dd_hw_stretch, "1", 0, 0, NULL, "(dd) stretch video using the hardware" },
 	{ "screen", NULL, rc_string, &screen_name, NULL, 0, 0, NULL, "specify which screen to use" },
@@ -728,12 +740,13 @@ static void throttle_speed(void)
 	throttle_speed_part(1,1);
 }
 
-// Throttle code changed to support parital frame syncing.
+// Throttle code changed to support partial frame syncing.
 // The emulated machine can often read, and respond to input by firing flippers in less than 10ms, but
 // if the emulation only runs in 60hz "chunks", we may need multiple frames to read and respond 
 // to flipper input.  By distributing the emulation more evenly over a frame, it creates more opportunities
 // for the emulated machine to "see" the input and respond to it before the pinball simulator starts to draw its frame.
 
+extern int time_fence_is_supported();
 void throttle_speed_part(int part, int totalparts)
 {
 	static double ticks_per_sleep_msec = 0;
@@ -741,6 +754,10 @@ void throttle_speed_part(int part, int totalparts)
 
 	// if we're only syncing to the refresh, bail now
 	if (win_sync_refresh)
+		return;
+
+	// if we're only syncing on an emulation fence, bail now
+	if (options.time_fence != 0.0 && time_fence_is_supported())
 		return;
 
 	// this counts as idle time

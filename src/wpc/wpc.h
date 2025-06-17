@@ -127,6 +127,7 @@ extern const core_tLCDLayout wpc_dispDMD[];
 / The WPC registers I know about
 / Some registers were moved in later
 / WPC generations. These end with "95"
+/ See https://www.scottkirvan.com/FreeWPC/The-WPC-Hardware.html for a detailed presentation
 /-----------------------------------*/
 /*----------------------------------
 /  WPC_FLIPPERS write (active low)
@@ -151,63 +152,81 @@ extern const core_tLCDLayout wpc_dispDMD[];
 / SHIFTBIT2 works in the same way but the address is unaffected
 /   SHIFTBIT2 = 1<<(SHIFTBIT2 & 7)
 /
-/ Dr. Who is the only game testing the shifter.
+/ Doctor Who is the only game testing the shifter.
 /------------------------------------------------------------------------------
+/ A = Alpha, M = ?, F = Fliptronics, D = DCS, S = Security, 9 = WPC95
 /------------------------------------------------AMFDS9-------------------------*/
-/* 3fc0 - 3fdf External IO. */
+/* 3fb0 .. 3fb7 - RS232 on WPC95 Audio/Video Board (used for NBA fastbreak linking and debugging) */
+/* 3fb8 .. 3fbf - DMD controller board */
+#define WPC_DMD_PAGE3200  (0x3fb8 - WPC_BASE) /*      x W: CPU access memory bank select (added with WPC-95 as discrete IC was replaced by a custom chip) */
+#define WPC_DMD_PAGE3000  (0x3fb9 - WPC_BASE) /*      x W: CPU access memory bank select (added with WPC-95 as discrete IC was replaced by a custom chip) */
+#define WPC_DMD_PAGE3600  (0x3fba - WPC_BASE) /*      x W: CPU access memory bank select (added with WPC-95 as discrete IC was replaced by a custom chip) */
+#define WPC_DMD_PAGE3400  (0x3fbb - WPC_BASE) /*      x W: CPU access memory bank select (added with WPC-95 as discrete IC was replaced by a custom chip) */
+#define WPC_DMD_PAGE3A00  (0x3fbc - WPC_BASE) /*      x W: CPU access memory bank select (HIGHPAGEWR in schematics 16.9148.1) */
+#define WPC_DMD_FIRQLINE  (0x3fbd - WPC_BASE) /*   xxxx R: Bit7 FIRQ state W: ack DMD FIRQ and write row number to raise next FIRQ (FIRQRD/ROW_IRQ in schematics 16.9148.1) */
+#define WPC_DMD_PAGE3800  (0x3fbe - WPC_BASE) /*   xxxx W: CPU access memory bank select (LOWPAGEWR in schematics 16.9148.1) */
+#define WPC_DMD_SHOWPAGE  (0x3fbf - WPC_BASE) /*   xxxx W: page to rasterize on next VBlank (DISPAGEWR in schematics 16.9148.1) */
+/* 3fc0 .. 3fdf - External IO boards */
 /* Printer board */
 #define WPC_PRINTBUSY     (0x3fc0 - WPC_BASE) /* xxxxx  R: Printer ready ??? */
 #define WPC_PRINTDATA     (0x3fc1 - WPC_BASE) /* xxxxx  W: send to printer */
 #define WPC_PRINTDATAX    (0x3fc2 - WPC_BASE) /* xxxxx  W: 0: Printer data available */
-#define WPC_SERIAL_DATA   (0x3fc3 - WPC_BASE)
-#define WPC_SERIAL_CTRL   (0x3fc4 - WPC_BASE)
-#define WPC_SERIAL_BAUD   (0x3fc5 - WPC_BASE)
+#define WPC_SERIAL_DATA   (0x3fc3 - WPC_BASE) /* xxxxx  8251 UART of WPC Printer Option Kit */
+#define WPC_SERIAL_CTRL   (0x3fc4 - WPC_BASE) /* xxxxx  8251 UART of WPC Printer Option Kit */
+#define WPC_SERIAL_BAUD   (0x3fc5 - WPC_BASE) /* xxxxx  baud rate divider (0=9600, 1=4800, ..., 5=300) */
 /* Ticket dispenser board */
 #define WPC_TICKET_DISP   (0x3fc6 - WPC_BASE)
+/* S11 Sound board */
+#define WPC_SND_S11_DATA0 (0x3fd0 - WPC_BASE) /*         */
+#define WPC_SND_S11_DATA1 (0x3fd1 - WPC_BASE) /*         */
+#define WPC_SND_S11_CTRL  (0x3fd2 - WPC_BASE) /*         */
+#define WPC_SND_S11_UNK   (0x3fd3 - WPC_BASE) /*         */
 /* Fliptronics 2 Board */
 #define WPC_FLIPPERS      (0x3fd4 - WPC_BASE) /*   xxx  R: switches W: Solenoids */
-/* Sound board */
-#define WPC_SOUNDIF       (0x3fdc - WPC_BASE) /* xxx    RW: Sound board interface */
-#define WPC_SOUNDBACK     (0x3fdd - WPC_BASE) /* xxx    RW: R: Sound data availble, W: Reset soundboard ? */
-
+/* WPC and DCS Sound board 0x3fd8-0x3fdf */
+#define WPC_SND_DATA      (0x3fdc - WPC_BASE) /* xxx    RW: Sound board interface */
+#define WPC_SND_CTRL      (0x3fdd - WPC_BASE) /* xxx    RW: R: Sound data available, W: Reset soundboard ? */
+/* Power driver board and misc. features */
 #define WPC_SOLENOID1     (0x3fe0 - WPC_BASE) /* xxxxxx W: Solenoid 25-28 */
 #define WPC_SOLENOID2     (0x3fe1 - WPC_BASE) /* xxxxxx W: Solenoid  1- 8 */
 #define WPC_SOLENOID3     (0x3fe2 - WPC_BASE) /* xxxxxx W: Solenoid 17-24 */
 #define WPC_SOLENOID4     (0x3fe3 - WPC_BASE) /* xxxxxx W: Solenoid  9-16 */
 #define WPC_LAMPROW       (0x3fe4 - WPC_BASE) /* xxxxxx W: Lamp row */
 #define WPC_LAMPCOLUMN    (0x3fe5 - WPC_BASE) /* xxxxxx W: Lamp column enable */
-#define WPC_GILAMPS       (0x3fe6 - WPC_BASE) /*        W: GI lights ?? */
+#define WPC_GILAMPS       (0x3fe6 - WPC_BASE) /*        W: GI Triac driver */
 #define WPC_DIPSWITCH     (0x3fe7 - WPC_BASE) /* xxxxxx R: CPU board dip-switches */
 #define WPC_SWCOINDOOR    (0x3fe8 - WPC_BASE) /* xxxxxx W: Coin door switches */
 #define WPC_SWROWREAD     (0x3fe9 - WPC_BASE) /* xxxx   R: Switch row read */
-#define WPC_PICREAD       (0x3fe9 - WPC_BASE) /*     xx R: PIC data */
+#define WPC_PICREAD       (0x3fe9 - WPC_BASE) /*     xx R: PIC data (include switch read) */
 #define WPC_SWCOLSELECT   (0x3fea - WPC_BASE) /* xxxx   W: Switch column enable */
-#define WPC_PICWRITE      (0x3fea - WPC_BASE) /*     xx R: PIC data */
+#define WPC_PICWRITE      (0x3fea - WPC_BASE) /*     xx R: PIC data (include switch strobe) */
+/* External board / Alphanum display / WPC95 flippers 0x3feb-0x3fef */
 #define WPC_EXTBOARD1     (0x3feb - WPC_BASE) /*   x    W: Extension Driver Board 1 */
-#define WPC_ALPHAPOS      (0x3feb - WPC_BASE) /* x      W: Select alphanumeric position */
+#define WPC_ALPHAPOS      (0x3feb - WPC_BASE) /* x      W: Alphanumeric column /DIS_STROBE */
 #define WPC_EXTBOARD2     (0x3fec - WPC_BASE) /*   x    W: Extension Driver Board 2 */
-#define WPC_ALPHA1HI      (0x3fec - WPC_BASE) /* x      W: Display 1st row hi bits */
+#define WPC_ALPHA1LO      (0x3fec - WPC_BASE) /* x      W: Alphanumeric 1st row lo bits /DIS_1 */
 #define WPC_EXTBOARD3     (0x3fed - WPC_BASE) /*   x    W: Extension Driver Board 3 */
-#define WPC_ALPHA1LO      (0x3fed - WPC_BASE) /* x      W: Display 1st row lo bits */
+#define WPC_ALPHA1HI      (0x3fed - WPC_BASE) /* x      W: Alphanumeric 1st row hi bits /DIS_2 */
 #define WPC_EXTBOARD4     (0x3fee - WPC_BASE) /*   x    W: Extension Driver Board 4 */
 #define WPC_FLIPPERCOIL95 (0x3fee - WPC_BASE) /*      x W: Flipper Solenoids */
-#define WPC_ALPHA2HI      (0x3fef - WPC_BASE) /* x      W: Display 2nd row hi bits */
-#define WPC_ALPHA2LO      (0x3fee - WPC_BASE) /* x      W:           b 2nd row lo bits */
+#define WPC_ALPHA2LO      (0x3fee - WPC_BASE) /* x      W: Alphanumeric 2nd row lo bits /DIS_3 */
 #define WPC_EXTBOARD5     (0x3fef - WPC_BASE) /*   x    W: Extension Driver Board 5 */
 #define WPC_FLIPPERSW95   (0x3fef - WPC_BASE) /*      x R: Flipper switches */
+#define WPC_ALPHA2HI      (0x3fef - WPC_BASE) /* x      W: Alphanumeric 2nd row hi bits /DIS_4 */
+/* CPU board features 0x3ff0 - 0x3fff */
 #define WPC_LED           (0x3ff2 - WPC_BASE) /* xxxxxx W: CPU LED (bit 7) */
 #define WPC_IRQACK        (0x3ff3 - WPC_BASE) /*        W: IRQ Ack ??? */
 #define WPC_SHIFTADRH     (0x3ff4 - WPC_BASE) /* xxxxxx RW: See above */
 #define WPC_SHIFTADRL     (0x3ff5 - WPC_BASE) /* xxxxxx RW: See above */
 #define WPC_SHIFTBIT      (0x3ff6 - WPC_BASE) /* xxxxxx RW: See above */
 #define WPC_SHIFTBIT2     (0x3ff7 - WPC_BASE) /* xxxxxx RW: See above */
-#define WPC_FIRQSRC       (0x3ff8 - WPC_BASE) /*   xxxx R: bit 7 0=DMD, 1=SOUND? W: Clear FIRQ line */
+#define WPC_HIGHRESTIMER  (0x3ff8 - WPC_BASE) /* xxxxxx guessed: R: bit 7=1 if counter is 0 (and FIRQ is raised) W: Clear FIRQ line and restart counter */
 #define WPC_RTCHOUR       (0x3ffa - WPC_BASE) /* xxxxxx RW: Real time clock: hour */
 #define WPC_RTCMIN        (0x3ffb - WPC_BASE) /* xxxxxx RW: Real time clock: minute */
 #define WPC_ROMBANK       (0x3ffc - WPC_BASE) /* xxxxxx W: Rombank switch */
 #define WPC_PROTMEM       (0x3ffd - WPC_BASE) /* xxxxxx W: enabled/disable protected memory */
 #define WPC_PROTMEMCTRL   (0x3ffe - WPC_BASE) /* xxxxxx W: Set protected memory area */
-#define WPC_WATCHDOG      (0x3fff - WPC_BASE) /* xxxxxx W: Watchdog */
+#define WPC_ZC_IRQ_ACK    (0x3fff - WPC_BASE) /* xxxxxx R: Bit7 zero cross state, Bit2 IRQ timer enabled W: Bit7 Ack IRQ, Bit2 enable IRQ timer, Bit1 reset watchdog */
 
 /*-- the internal state of the WPC chip. Should only be used in memory handlers --*/
 extern UINT8 *wpc_data;
@@ -224,10 +243,6 @@ extern WRITE_HANDLER(orkin_w);
 /*-- use this if a fallback is required in a custom memory handler --*/
 extern READ_HANDLER(wpc_r);
 extern WRITE_HANDLER(wpc_w);
-
-/*-- use this function to send FIRQ to main CPU --*/
-#define WPC_FIRQ_DMD    0x01
-#define WPC_FIRQ_SOUND  0x02
 
 extern MACHINE_DRIVER_EXTERN(wpc_alpha);
 extern MACHINE_DRIVER_EXTERN(wpc_dmd);
@@ -250,9 +265,9 @@ extern MACHINE_DRIVER_EXTERN(wpc_95S);
 #define wpc_m95S         wpc_95S
 
 // Game specific options
-#define WPC_CFTBL       0x01 // CFTBL specific hardware: chase light 2 bit decoder from solenoid #3 output, wired through triacs to 2 GI outputs, leading to 8 additional PWM controlled GI
-#define WPC_PH          0x02 // Phantom Haus specific hardware (not really a pinball)
-
+#define WPC_CFTBL        0x01 // CFTBL specific hardware: chase light 2 bit decoder from solenoid #3 output, wired through triacs to 2 GI outputs, leading to 8 additional PWM controlled GI
+#define WPC_PH           0x02 // Phantom Haus specific hardware (not really a pinball)
+// next: 0x04
 
 int wpc_m2sw(int col, int row);
 void wpc_set_modsol_aux_board(int board);

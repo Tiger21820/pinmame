@@ -104,8 +104,7 @@
 #define GTS3_COMINPORT       CORE_COREINPORT
 
 #define GTS3_SOLSMOOTH       4 /* Smooth the Solenoids over this number of VBLANKS */
-#define GTS3_LAMPSMOOTH      1 /* Smooth the lamps over this number of VBLANKS */
-#define GTS3_DISPLAYSMOOTH   1 /* Smooth the display over this number of VBLANKS */
+#define GTS3_LEDSMOOTH       1 /* Smooth the LED display over this number of VBLANKS */
 
 /*-- To access C-side multiplexed solenoid/flasher --*/
 #define GTS3_CSOL(x) ((x)+24)
@@ -189,8 +188,8 @@
        ROM_LOAD(n1, 0x00000, 0, chk1)
 
 extern void UpdateSoundLEDS(int num,UINT8 bit);
-extern PINMAME_VIDEO_UPDATE(gts3_dmd128x32);
 extern PINMAME_VIDEO_UPDATE(gts3_dmd128x32a);
+extern PINMAME_VIDEO_UPDATE(gts3_dmd128x32b);
 
 /*-- These are only here so the game structure can be in the game file --*/
 extern MACHINE_DRIVER_EXTERN(gts3_1a);
@@ -200,12 +199,7 @@ extern MACHINE_DRIVER_EXTERN(gts3_1as80b2);
 extern MACHINE_DRIVER_EXTERN(gts3_1as80b3);
 extern MACHINE_DRIVER_EXTERN(gts3_1b);
 extern MACHINE_DRIVER_EXTERN(gts3_1bs);
-extern MACHINE_DRIVER_EXTERN(gts3_2_4c_a);
-extern MACHINE_DRIVER_EXTERN(gts3_2_4c_b);
-extern MACHINE_DRIVER_EXTERN(gts3_2_5c);
-extern MACHINE_DRIVER_EXTERN(gts3_2a_4c_a);
-extern MACHINE_DRIVER_EXTERN(gts3_2a_4c_b);
-extern MACHINE_DRIVER_EXTERN(gts3_2a_5c);
+extern MACHINE_DRIVER_EXTERN(gts3_21);
 extern MACHINE_DRIVER_EXTERN(gts3_22);
 
 #define mGTS3           gts3_1a
@@ -215,16 +209,11 @@ extern MACHINE_DRIVER_EXTERN(gts3_22);
 #define mGTS3S80B3      gts3_1as80b3
 #define mGTS3B          gts3_1b
 #define mGTS3BS         gts3_1bs
-#define mGTS3DMDS_4C_a  gts3_2_4c_a
-#define mGTS3DMDS_4C_b  gts3_2_4c_b
-#define mGTS3DMDS_5C    gts3_2_5c
-#define mGTS3DMDSA_4C_a gts3_2a_4c_a
-#define mGTS3DMDSA_4C_b gts3_2a_4c_b
-#define mGTS3DMDSA_5C   gts3_2a_5c
-#define mGTS3DMDS2      gts3_22 // uses 4_a color_mode
+#define mGTS3DMDS       gts3_21
+#define mGTS3DMDS2      gts3_22
 
 typedef struct {
-  int   version;
+  int   has2DMD;
   UINT8 pa0; // bool
   UINT8 pa1; // bool
   UINT8 pa2; // bool
@@ -237,15 +226,14 @@ typedef struct {
   UINT8 status2; // bool
   UINT8 dstrb; // bool
   UINT8 dmd_visible_addr;
-  UINT8 nextDMDFrame;
-  UINT8 color_mode; // 4_a, 4_b or 5 (=0,1,2)
+  core_tDMDPWMState pwm_state;
 } GTS3_DMDlocals;
 
 typedef struct {
   UINT8  alphagen; //0,1,2
   int    alphaNumCol, alphaNumColShiftRegister;
   core_tWord activeSegments[2]; // Realtime active alphanum segments
-  int    vblankCount;
+  int    interfaceUpdateCount;
   UINT32 solenoids;
   int    lampRow, lampColumn;
   UINT8  diagnosticLed;  // bool
@@ -264,8 +252,6 @@ typedef struct {
   UINT8  sound_data;
   UINT8  prn[8];
 
-  int bitSet;
-  UINT8 vblank_counter;
   UINT8 irq;
 
   int modsol_rate_counter;

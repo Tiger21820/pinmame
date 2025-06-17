@@ -95,7 +95,7 @@ static INTERRUPT_GEN(LTD_vblank) {
   locals.vblankCount++;
   /*-- lamps --*/
   if ((locals.vblankCount % LTD_LAMPSMOOTH) == 0) {
-    memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+    memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
   }
   /*-- solenoids --*/
   if ((locals.vblankCount % LTD_SOLSMOOTH) == 0) {
@@ -156,7 +156,6 @@ static void snd_stop(int param) {
  */
 static WRITE_HANDLER(peri_w) {
   static const int freq[] = { 105, 70, 40, 30, 21, 15, 10, 5 };
-  int seg;
   if (offset < 0x06) {
     if (!strncasecmp(Machine->gamedrv->name, "spcpoker", 8)) {
       if (offset == 5) { // extra strobe for more lamps
@@ -196,7 +195,7 @@ static WRITE_HANDLER(peri_w) {
     }
   } else if (offset == 0x06) { // either lamps or solenoids, or a mix of both!
     coreGlobals.tmpLampMatrix[6] = data;
-    if (cpu_gettotalcpu() > 1 && strncasecmp(Machine->gamedrv->name, "spcpoker", 8)) { // for Ekky sound module
+    if (cpu_gettotalcpu() > 1 && strncasecmp(Machine->gamedrv->name, "spcpoker", 8)) { // for Ekky sound module, all games except Space Poker (as its sound works different, see peri_w)
       locals.auxData = data & 0x7f; // mask out "Happy birthday" tune for the Ekky module
       if (locals.auxData) {
         cpu_set_nmi_line(LTD_CPU_EKKY, PULSE_LINE);
@@ -210,7 +209,7 @@ static WRITE_HANDLER(peri_w) {
     coreGlobals.solenoids = locals.solenoids;
     locals.vblankCount = 0;
   } else if (offset == 0x08) {
-    seg = 9 - (locals.strobe & 0x0f);
+    int seg = 9 - (locals.strobe & 0x0f);
     locals.segments[seg].w = core_bcd2seg7a[data >> 4];
     locals.segments[10 + seg].w = core_bcd2seg7a[data & 0x0f];
     if (core_gameData->hw.gameSpecific1 & (1 << seg)) {
@@ -318,7 +317,7 @@ static INTERRUPT_GEN(LTD4_vblank) {
   locals.vblankCount++;
   /*-- lamps --*/
   if ((locals.vblankCount % LTD_LAMPSMOOTH) == 0) {
-    memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+    memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
   }
   /*-- solenoids --*/
   if ((locals.vblankCount % LTD4_SOLSMOOTH) == 0) {

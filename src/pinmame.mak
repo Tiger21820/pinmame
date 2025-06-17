@@ -141,6 +141,7 @@ PINGAMES += $(PINOBJ)/sims/wpc/full/gw.o
 PINGAMES += $(PINOBJ)/sims/wpc/full/hurr.o
 PINGAMES += $(PINOBJ)/sims/wpc/full/ij.o
 PINGAMES += $(PINOBJ)/sims/wpc/full/jd.o
+PINGAMES += $(PINOBJ)/sims/wpc/full/nbaf.o
 PINGAMES += $(PINOBJ)/sims/wpc/full/pz.o
 PINGAMES += $(PINOBJ)/sims/wpc/full/rs.o
 PINGAMES += $(PINOBJ)/sims/wpc/full/sttng.o
@@ -167,7 +168,6 @@ PINGAMES += $(PINOBJ)/sims/wpc/prelim/jb.o
 PINGAMES += $(PINOBJ)/sims/wpc/prelim/jm.o
 PINGAMES += $(PINOBJ)/sims/wpc/prelim/jy.o
 PINGAMES += $(PINOBJ)/sims/wpc/prelim/mb.o
-PINGAMES += $(PINOBJ)/sims/wpc/prelim/nbaf.o
 PINGAMES += $(PINOBJ)/sims/wpc/prelim/nf.o
 PINGAMES += $(PINOBJ)/sims/wpc/prelim/pop.o
 PINGAMES += $(PINOBJ)/sims/wpc/prelim/sc.o
@@ -273,9 +273,9 @@ ifeq ($(MAMEOS),windows)
 DEFS += -DDIRECTSOUND_VERSION=0x0300 \
         -DDIRECTINPUT_VERSION=0x0500 \
         -DDIRECTDRAW_VERSION=0x0300 \
-        -DWINVER=0x0400 \
+        -DWINVER=0x0500 \
         -D_WIN32_IE=0x0500 \
-        -D_WIN32_WINNT=0x0400 \
+        -D_WIN32_WINNT=0x0500 \
         -DWIN32 \
         -UWINNT
 endif

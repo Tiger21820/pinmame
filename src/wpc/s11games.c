@@ -150,11 +150,18 @@ S11CS_SOUNDROM8(     "hs_u4.l1",  CRC(0f96e094) SHA1(58650705a02a71ced85f5c2a243
 S11_ROMEND
 #define input_ports_hs input_ports_s11
 
-S11_ROMSTART28(hs,l3,"u26-l3.rom", CRC(fd587959) SHA1(20fe6d7bd617b1fa886362ce520393a25be9a632),
+S11_ROMSTART28(hs,l3,"u26-l3.rom",CRC(fd587959) SHA1(20fe6d7bd617b1fa886362ce520393a25be9a632),
                      "hs_u27.l4", CRC(24c6f7f0) SHA1(bb0058650ec0908f88b6a202df79e971b46f8594))
 S11XS_SOUNDROM88(    "hs_u21.l2", CRC(c0580037) SHA1(675ca65a6a20f8607232c532b4d127641f77d837),
                      "hs_u22.l2", CRC(c03be631) SHA1(53823e0f55377a45aa181882c310dd307cf368f5))
 S11CS_SOUNDROM8(     "hs_u4.l1",  CRC(0f96e094) SHA1(58650705a02a71ced85f5c2a243722a35282cbf7))
+S11_ROMEND
+
+S11_ROMSTART48(hs,p4g,"U26Proto4DE.BIN", CRC(c7d33a52) SHA1(bbf84d6927215c25bd7952fda6ad18c6b4657625), // had sticker with 'PROTO4' on it, but reports as G-4. Board came with a L-4 U27. Setting #51 changes text to german (which is stored in the additional 8k, compared to the english ROM sets).
+                      "hs_u27.l4", CRC(24c6f7f0) SHA1(bb0058650ec0908f88b6a202df79e971b46f8594))
+S11XS_SOUNDROM88(     "hs_u21.l2", CRC(c0580037) SHA1(675ca65a6a20f8607232c532b4d127641f77d837),
+                      "hs_u22.l2", CRC(c03be631) SHA1(53823e0f55377a45aa181882c310dd307cf368f5))
+S11CS_SOUNDROM8(      "hs_u4.l1",  CRC(0f96e094) SHA1(58650705a02a71ced85f5c2a243722a35282cbf7))
 S11_ROMEND
 
 /* older competition MOD (6b05)
@@ -175,6 +182,8 @@ S11_ROMEND
 
 CORE_GAMEDEF(hs, l4, "High Speed (L-4)", 1986, "Williams", s11_mS11XS,0)
 CORE_CLONEDEF(hs,l3,l4, "High Speed (L-3)", 1986, "Williams", s11_mS11XS,0)
+// there was a G-3 for sure (german handbook mentions it)
+CORE_CLONEDEF(hs,p4g,l4, "High Speed (G-4 / German PROTO4)", 1986, "Williams", s11_mS11XS,0)
 CORE_CLONEDEF(hs,l4c,l4, "High Speed (L-4C Competition MOD)", 2018, "Williams", s11_mS11XS,0)
 
 /*--------------------
@@ -859,7 +868,7 @@ static core_tLCDLayout dispPolic[] = {
   { 2,0, 0,16,CORE_SEG16 },
   { 4,0,20,16,CORE_SEG8},{0}
 };
-INITGAME(polic,GEN_S11B, dispPolic, 12, FLIP_SWNO(58,57), S11_LOWALPHA|S11_DISPINV,S11_MUXSW2)
+INITGAME(polic,GEN_S11B, dispPolic, 12, FLIP_SWNO(58,57),S11_LOWALPHA|S11_DISPINV,S11_MUXSW2)
 S11_ROMSTART48(polic,l4,"pfrc_u26.l4", CRC(1a1409e9) SHA1(775d35a22483bcf8c4b03841e0aca22b6504a48f),
                         "pfrc_u27.l4", CRC(641ed5d4) SHA1(f98b8bb64184aba062715555bd1de679d6382ac3))
 S11XS_SOUNDROM88(       "pfrc_u21.l1", CRC(7729afd3) SHA1(9cd2898a7a4203cf3b2dcd203e25cde5dd582ee7),
@@ -979,10 +988,30 @@ S11CS_SOUNDROM888(      "cats_u4.l1",   CRC(18c62813) SHA1(a4fb69cfedd0b92c22b59
                         "cats_u20.l1",  CRC(bf4dc35a) SHA1(9920ce90d93fb6ecf98792c35bb6eb8862a969f3))
 S11_ROMEND
 
+S11_ROMSTART48(bcats,tcm12,"cats_u26.tcm12",CRC(5bcae0e6) SHA1(5835a29fabad27a4aec08645bb71c48c07b2688e),
+                        "cats_u27.tcm12", CRC(4b4beda7) SHA1(879950aebda5d23e546465e7f13bfa3a5717b057))
+S11XS_SOUNDROM88(       "cats_u21.l1",    CRC(04110d08) SHA1(4b44b26983cb5d14a93c16a19dc2bdbaa665dc69),
+                        "cats_u22.l1",    CRC(7e152c78) SHA1(b4ab770fdd9420a5d35e55bf8fb84c99ac544b8b))
+S11CS_SOUNDROM888(      "cats_u4.l1",     CRC(18c62813) SHA1(a4fb69cfedd0b92c22b599913df3cdf8b3eef42c),
+                        "cats_u19.l1",    CRC(f2fea68b) SHA1(9a41823e71342b7a162420378f122bba34ce0636),
+                        "cats_u20.l1",    CRC(bf4dc35a) SHA1(9920ce90d93fb6ecf98792c35bb6eb8862a969f3))
+S11_ROMEND
+
+S11_ROMSTART48(bcats,tcm13,"cats_u26.tcm13",CRC(291bed37) SHA1(d376ed3b238581d1e7474e40949dfaf4ac0a6e5e),
+                        "cats_u27.tcm13", CRC(51099fd2) SHA1(b8564dc559fab2ae87698087b0555fbd6d341f14))
+S11XS_SOUNDROM88(       "cats_u21.l1",    CRC(04110d08) SHA1(4b44b26983cb5d14a93c16a19dc2bdbaa665dc69),
+                        "cats_u22.l1",    CRC(7e152c78) SHA1(b4ab770fdd9420a5d35e55bf8fb84c99ac544b8b))
+S11CS_SOUNDROM888(      "cats_u4.l1",     CRC(18c62813) SHA1(a4fb69cfedd0b92c22b599913df3cdf8b3eef42c),
+                        "cats_u19.l1",    CRC(f2fea68b) SHA1(9a41823e71342b7a162420378f122bba34ce0636),
+                        "cats_u20.l1",    CRC(bf4dc35a) SHA1(9920ce90d93fb6ecf98792c35bb6eb8862a969f3))
+S11_ROMEND
+
 CORE_GAMEDEF(bcats,l5, "Bad Cats (L-5)", 1989, "Williams", s11_mS11BS,0)
 CORE_CLONEDEF(bcats,l2,l5,"Bad Cats (LA-2)", 1989, "Williams", s11_mS11BS,0)
 CORE_CLONEDEF(bcats,g4,l5,"Bad Cats (LG-4)", 1989, "Williams", s11_mS11BS,0)
 CORE_CLONEDEF(bcats,tcm,l5,"Bad Cats (The Cat's Meow)", 2023, "idealjoker", s11_mS11BS,0) //The Cat's Meow -- a new home ROM for Bad Cats https://pinside.com/pinball/forum/topic/the-cat-s-meow-a-new-home-rom-for-bad-cats
+CORE_CLONEDEF(bcats,tcm12,l5,"Bad Cats (The Cat's Meow 1.2)", 2024, "idealjoker", s11_mS11BS,0)
+CORE_CLONEDEF(bcats,tcm13,l5,"Bad Cats (The Cat's Meow 1.3)", 2025, "idealjoker", s11_mS11BS,0)
 
 /*-----------------------
 / Mousin' Around 12/89

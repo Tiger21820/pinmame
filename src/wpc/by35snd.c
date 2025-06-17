@@ -736,7 +736,7 @@ static WRITE_HANDLER(cs_ctrl_w) {
   cpu_set_irq_line(cslocals.brdData.cpuNo, M6803_TIN_LINE, (data & 1) ? ASSERT_LINE : CLEAR_LINE);
 }
 
-void by45_p21_w(int data)
+void by45_p21_w(UINT8 data)
 {
 	cslocals.p21 = data ? 1 : 0;
 }
@@ -910,11 +910,11 @@ static WRITE_HANDLER(sd_pia0cb2_w) {
   if (!data) {
     sdlocals.ledcount++;
     logerror("SD LED: %d\n", sdlocals.ledcount);
-    if (core_gameData->hw.gameSpecific1) { // hack for Blackwater 100 (main CPU boots up too fast)
+    if (core_gameData->hw.gameSpecific1 & 1) { // hack for Blackwater 100 (main CPU boots up too fast)
       if (sdlocals.ledcount == 5) // suspend main cpu, soundboard not ready yet
         cpu_set_halt_line(0, 1);
-      else if (core_gameData->hw.gameSpecific1 && sdlocals.ledcount == 6) // resume main cpu, soundboard ready
-      cpu_set_halt_line(0, 0);
+      else if (sdlocals.ledcount == 6) // resume main cpu, soundboard ready
+        cpu_set_halt_line(0, 0);
     }
   }
   sndbrd_ctrl_cb(sdlocals.brdData.boardNo,data);

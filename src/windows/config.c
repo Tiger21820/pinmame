@@ -28,6 +28,17 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef _WIN32_WINNT
+#if _MSC_VER >= 1800
+ // Windows 2000 _WIN32_WINNT_WIN2K
+ #define _WIN32_WINNT 0x0500
+#elif _MSC_VER < 1600
+ #define _WIN32_WINNT 0x0400
+#else
+ #define _WIN32_WINNT 0x0403
+#endif
+#define WINVER _WIN32_WINNT
+#endif
 #include <windows.h>
 #include "driver.h"
 #include "rc.h"
@@ -91,6 +102,9 @@ struct rc_option pinmame_opts[] = {
 #endif /* PROC_SUPPORT */
         { "vgmwrite", NULL, rc_bool, &pmoptions.vgmwrite, "0", 0, 0, NULL, "Enable to write a VGM of the current session (name is based on romname)" },
         { "force_stereo", NULL, rc_bool, &pmoptions.force_mono_to_stereo, "0", 0, 0, NULL, "Always force stereo output (e.g. to better support multi channel sound systems)" },
+#ifdef PINMAME_HOST_UART
+        { "serial_device", NULL, rc_string, &pmoptions.serial_device, NULL, 0, 0, NULL, "COM port mapped to WPC UART" },
+#endif
         { NULL, NULL, rc_end, NULL, NULL, 0, 0, NULL, NULL }
 };
 #endif /* PINMAME */

@@ -93,6 +93,9 @@ struct rc_option pinmame_opts[] = {
 	{ "p-roc",NULL, rc_string,&pmoptions.p_roc, "None",  0, 0, NULL, "YAML Machine description file" },
 	{ "virtual_dmd", NULL, rc_bool,&pmoptions.virtual_dmd,  "1",  0, 0, NULL, "Enable DMD emulation" },
 #endif
+#ifdef PINMAME_HOST_UART
+	{ "serial_device", NULL, rc_string, &pmoptions.serial_device, NULL, 0, 0, NULL, "/dev/tty serial port mapped to WPC UART" },
+#endif
 	{ NULL,	NULL, rc_end, NULL, NULL, 0, 0,	NULL, NULL }
 };
 #endif /* PINMAME */
@@ -499,7 +502,7 @@ int config_init (int argc, char *argv[])
 		if (end == 0)
 			len = strlen(begin);
 		else
-			len = end - begin;            
+			len = end - begin;
 
 		for (i = 0; drivers[i]; i++)
 		{
@@ -518,7 +521,7 @@ int config_init (int argc, char *argv[])
 			}
 		}
 	}
-#endif                                
+#endif
 
 	/* educated guess on what the user wants to play */
 	if ( (game_index == -1) && use_fuzzycmp)
@@ -538,12 +541,11 @@ int config_init (int argc, char *argv[])
 				/* game is a clone */
 				if (drivers[i]->clone_of != 0 && !(drivers[i]->clone_of->flags & NOT_A_DRIVER))
 				{
-					if ((!drivers[game_index]->flags & GAME_NOT_WORKING) || (drivers[i]->flags & GAME_NOT_WORKING))
+					if ((!(drivers[game_index]->flags & GAME_NOT_WORKING)) || (drivers[i]->flags & GAME_NOT_WORKING))
 						continue;
 				}
 				else continue;
 			}
-
 
 			/* we found a better match */
 			game_index = i;

@@ -140,7 +140,7 @@ static INTERRUPT_GEN(se_vblank) {
 				}
 			}
 		}
-	memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+	memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
 #else
     int i;
     for (i = 0; i < 10; ++i) {
@@ -150,8 +150,8 @@ static INTERRUPT_GEN(se_vblank) {
     }
     if ((selocals.vblankCount % (VBLANK*SE_LAMPSMOOTH)) == 0)
     {
-        memcpy(coreGlobals.lampMatrix+10, coreGlobals.tmpLampMatrix+10, sizeof(coreGlobals.tmpLampMatrix)-10);
-        memset(coreGlobals.lampMatrix, 0, 10);
+        memcpy((void*)(coreGlobals.lampMatrix+10), (void*)(coreGlobals.tmpLampMatrix+10), sizeof(coreGlobals.tmpLampMatrix)-10);
+        memset((void*)coreGlobals.lampMatrix, 0, 10);
         for (i = 0; i < 10; ++i) {
             int i2;
             for (i2 = 0; i2 < 8; ++i2)
@@ -160,7 +160,7 @@ static INTERRUPT_GEN(se_vblank) {
         memset(selocals.lampstate, 0, sizeof(selocals.lampstate));
     }
 #endif
-    memset(coreGlobals.tmpLampMatrix, 0, 10);
+    memset((void*)coreGlobals.tmpLampMatrix, 0, 10);
   }
   /*-- solenoids --*/
   if ((selocals.vblankCount % VBLANK) == 0) {
@@ -168,20 +168,18 @@ static INTERRUPT_GEN(se_vblank) {
     selocals.flipsol = selocals.flipsolPulse;
   }
   if ((selocals.vblankCount % (VBLANK*SE_SOLSMOOTH)) == 0) {
-	coreGlobals.solenoids = selocals.solenoids;
-	// Fast flips.   Use Solenoid 15, this is the left flipper solenoid that is 
-	// unused because it is remapped to VPM flipper constants.  
-   if (selocals.fastflipaddr > 0 && memory_region(SE_CPUREGION)[selocals.fastflipaddr - 1] > 0) {
-     coreGlobals.solenoids |= 0x4000;
-     coreGlobals.binaryOutputState[(CORE_MODOUT_SOL0 + 8) / 8] |= 0x40;
-     coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + 14].value = 1.0f;
-   }
-   else
-   {
-     coreGlobals.binaryOutputState[(CORE_MODOUT_SOL0 + 8) / 8] &= ~0x40;
-     coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + 14].value = 0.0f;
-   }
-	selocals.solenoids = coreGlobals.pulsedSolState;
+	 coreGlobals.solenoids = selocals.solenoids;
+	 // Fast flips.   Use Solenoid 15, this is the left flipper solenoid that is 
+	 // unused because it is remapped to VPM flipper constants.  
+    if (selocals.fastflipaddr > 0 && memory_region(SE_CPUREGION)[selocals.fastflipaddr - 1] > 0) {
+       coreGlobals.solenoids |= 0x4000;
+       core_write_pwm_output(CORE_MODOUT_SOL0 + 15 - 1, 1, 1);
+    }
+    else
+    {
+       core_write_pwm_output(CORE_MODOUT_SOL0 + 15 - 1, 1, 0);
+    }
+	 selocals.solenoids = coreGlobals.pulsedSolState;
 #ifdef PROC_SUPPORT
 		if (coreGlobals.p_rocEn) {
 			static UINT64 lastSol = 0;
@@ -301,7 +299,7 @@ static MACHINE_INIT(se3) {
       core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 6 * 8, CORE_MODOUT_LED);
    coreGlobals.nSolenoids = CORE_FIRSTCUSTSOL - 1 + core_gameData->hw.custSol;
    core_set_pwm_output_type(CORE_MODOUT_SOL0, coreGlobals.nSolenoids, CORE_MODOUT_SOL_2_STATE);
-   core_set_pwm_output_type(CORE_MODOUT_SOL0 + 14, 2, CORE_MODOUT_NONE); // Fake solenoids for fast flip
+   core_set_pwm_output_type(CORE_MODOUT_SOL0 + 15 - 1, 2, CORE_MODOUT_PULSE); // Fake solenoids for fast flip
    coreGlobals.nGI = 1;
    core_set_pwm_output_type(CORE_MODOUT_GI0, coreGlobals.nGI, CORE_MODOUT_BULB_44_5_7V_AC);
    const struct GameDriver* rootDrv = Machine->gamedrv;
@@ -317,10 +315,11 @@ static MACHINE_INIT(se3) {
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 30 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
    }
    else if (strncasecmp(grn, "lotr", 4) == 0) { // The Lord of The Rings
-      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 14 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
-      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
-      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
-      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 29 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
+      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 14 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
+      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_906_20V_DC_WPC);
+      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 3, CORE_MODOUT_BULB_906_20V_DC_WPC);
+      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 29 - 1, 2, CORE_MODOUT_BULB_906_20V_DC_WPC);
+      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 31 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
    }
    else if ((strncasecmp(grn, "nascar", 6) == 0) || (strncasecmp(grn, "dalejr", 6) == 0)) { // Nascar & Dale Jr. (limited edition of Nascar)
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
@@ -418,7 +417,7 @@ static MACHINE_INIT(se) {
      core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 6 * 8, CORE_MODOUT_LED);
   coreGlobals.nSolenoids = CORE_FIRSTCUSTSOL - 1 + core_gameData->hw.custSol;
   core_set_pwm_output_type(CORE_MODOUT_SOL0, coreGlobals.nSolenoids, CORE_MODOUT_SOL_2_STATE);
-  core_set_pwm_output_type(CORE_MODOUT_SOL0 + 14, 2, CORE_MODOUT_NONE); // Fake solenoids for fast flip
+  core_set_pwm_output_type(CORE_MODOUT_SOL0 + 15 - 1, 2, CORE_MODOUT_PULSE); // Fake solenoids for fast flip
   coreGlobals.nGI = 1;
   core_set_pwm_output_type(CORE_MODOUT_GI0, coreGlobals.nGI, CORE_MODOUT_BULB_44_5_7V_AC);
   // Game specific hardware
@@ -449,7 +448,7 @@ static MACHINE_INIT(se) {
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if ((strncasecmp(grn, "harl_a13", 8) == 0) || (strncasecmp(grn, "harl_a40", 8) == 0)) { // Harley Davidson
+  else if (strncasecmp(grn, "harl_", 5) == 0) { // Harley Davidson
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
@@ -496,7 +495,7 @@ static MACHINE_INIT(se) {
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 32 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(grn, "sprk_103", 8) == 0) { // South Park
+  else if (strncasecmp(grn, "sprk_", 5) == 0) { // South Park
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 7 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
@@ -518,7 +517,7 @@ static MACHINE_INIT(se) {
      core_set_pwm_output_bulb(CORE_MODOUT_SOL0 + 4 - 1, 1, BULB_44, 19.f - 0.7f, TRUE, 0.f, 1.f); // Backbox GI: 19V AC switched #44 Bulbs (Sol 1-16 uses Mosfets with low voltage drop)
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 26 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
-  else if (strncasecmp(grn, "twst_405", 8) == 0) { // Twister
+  else if (strncasecmp(grn, "twst_", 5) == 0) { // Twister
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 22 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
@@ -590,6 +589,7 @@ static WRITE_HANDLER(lampdriv_w) {
   core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0     ,  selocals.lampColumn       & 0x00FF, selocals.lampRow, 8);
   core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0 + 64, (selocals.lampColumn >> 8) & 0x00FF, selocals.lampRow, 2);
 }
+static READ_HANDLER(lampdriv_r) { return core_revbyte(selocals.lampRow); } // GoldenEye reads from here (while it is a write location), so wire it up
 static WRITE_HANDLER(lampstrb_w) {
   //core_setLamp(coreGlobals.tmpLampMatrix, selocals.lampColumn = (selocals.lampColumn & 0xff00) | data, selocals.lampRow);
   selocals.lampColumn = (selocals.lampColumn & 0xff00) | data;
@@ -637,13 +637,17 @@ static READ_HANDLER(dip_r) { return ~core_getDip(0); }
 
 /*-- Solenoids --*/
 static const int solmaskno[] = { 8, 0, 16, 24 };
-static WRITE_HANDLER(solenoid_w) {
-  core_write_pwm_output_8b(CORE_MODOUT_SOL0 + solmaskno[offset], data);
+WRITE_HANDLER(se_solenoid_w) {
   UINT32 mask = ~(0xff<<solmaskno[offset]);
   UINT32 sols = data<<solmaskno[offset];
   if (offset == 0) { /* move flipper power solenoids (L=15,R=16) to (R=45,L=47) */
     selocals.flipsol |= selocals.flipsolPulse = ((data & 0x80)>>7) | ((data & 0x40)>>4);
     sols &= 0xffff3fff; /* mask off flipper solenoids */
+    core_write_masked_pwm_output_8b(CORE_MODOUT_SOL0 + solmaskno[offset], data, 0x3F);
+  }
+  else
+  {
+    core_write_pwm_output_8b(CORE_MODOUT_SOL0 + solmaskno[offset], data);
   }
   coreGlobals.pulsedSolState = (coreGlobals.pulsedSolState & mask) | sols;
   selocals.solenoids |= sols;
@@ -793,6 +797,8 @@ static WRITE_HANDLER(giaux_w) {
 #endif
   coreGlobals.gi[0]=(~data & 0x01) ? 9 : 0;
   core_write_pwm_output_8b(CORE_MODOUT_GI0, ~data & 0x01);
+
+  // High Roller Casino, RollerCoaster Tycoon & Monopoly Mini DMDs
   if (core_gameData->hw.display & (SE_MINIDMD|SE_MINIDMD3)) {
     if (data & ~selocals.lastgiaux & 0x80) { /* clock in data to minidmd */
       selocals.minidata[selocals.miniidx] = selocals.auxdata & 0x7f;
@@ -818,6 +824,7 @@ static WRITE_HANDLER(giaux_w) {
       coreGlobals.solenoids2 = (coreGlobals.solenoids2 & 0xff0f) | ((data & 0x38) << 1);
     selocals.lastgiaux = data;
   }
+  // The Simpsons Pinball Party mini DMD
   else if (core_gameData->hw.display & SE_MINIDMD2) {
     if (data & ~selocals.lastgiaux & 0x80) { /* clock in data to minidmd */
       selocals.miniidx = (selocals.miniidx + 1) % 7;
@@ -839,6 +846,7 @@ static WRITE_HANDLER(giaux_w) {
       coreGlobals.solenoids2 = (coreGlobals.solenoids2 & 0xff0f) | (selocals.auxdata << 4);
     selocals.lastgiaux = data;
   }
+  // Terminator 3, Lord of The Ring, Sopranos, Nascar / Dale Jr / Grand Prix
   else if (core_gameData->hw.display & SE_LED) { // map 6x8 LEDs as extra lamp columns
     static const int order[] = { 6, 2, 4, 5, 1, 3, 0 };
     if (selocals.auxdata == 0x30 && (selocals.lastgiaux & 0x40)) selocals.miniidx = 0;
@@ -855,6 +863,7 @@ static WRITE_HANDLER(giaux_w) {
       coreGlobals.solenoids2 = (coreGlobals.solenoids2 & 0xff0f) | (selocals.auxdata << 4);
     selocals.lastgiaux = selocals.auxdata;
   }
+  // Titanic (coin dropper)
   else if (core_gameData->hw.display & SE_LED2) { // a whole lotta extra lamps...
     if (data & ~selocals.lastgiaux & 0x80) { /* clock in data to minidmd */
       selocals.miniidx = (selocals.miniidx + 1) % 32;
@@ -865,20 +874,31 @@ static WRITE_HANDLER(giaux_w) {
       core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 9 * 8 + selocals.miniidx * 8, selocals.auxdata);
     }
     selocals.lastgiaux = data;
-  } else if (core_gameData->hw.display & SE_DIGIT) {
+  }
+  // Apollo 13 additional alpha num display
+  else if (core_gameData->hw.display & SE_DIGIT) {
     coreGlobals.solenoids2 = (coreGlobals.solenoids2 & 0xff0f) | (core_revbyte(selocals.auxdata & 0xf0) << 2);
     coreGlobals.segments[0].w = core_bcd2seg7[selocals.auxdata & 0x0f];
-  } else
-    coreGlobals.solenoids2 = (coreGlobals.solenoids2 & 0xff0f) | (selocals.auxdata << 4);
+  }
+  // All other extension boards: on any strobe, latch aux data to extended solenoids
+  else {
+     coreGlobals.solenoids2 = (coreGlobals.solenoids2 & 0xff0f) | (selocals.auxdata << 4);
+     core_write_masked_pwm_output_8b(CORE_MODOUT_SOL0 + 33 - 1, selocals.auxdata, 0x0F); // Solenoids 33..36
+     // Notes:
+     // - Independance Day:
+     //    ESTB strobes data on auxdata. Alien head is controlled by servo board 520-5152-00 (1 bit to toggle between 2 positions)
+     //    but controller also sends data to allow using Tommy's Blinder servo board 520-5078-00 as a spare (2 bits, Clear/Set, to
+     //    toggle between 2 positions). Sol 34 can be used to identify position 2 versus position 1.
+  }
 }
 
-// MINI DMD Type 1 (HRC) (15x7)
+// MINI DMD Type 1 (High Roller Casino) (15x7)
 PINMAME_VIDEO_UPDATE(seminidmd1_update) {
   int ii,bits;
   UINT16 *seg = coreGlobals.drawSeg;
 
   for (ii = 0, bits = 0x40; ii < 7; ii++, bits >>= 1) {
-    UINT8 *line = &coreGlobals.dotCol[ii+1][0];
+    UINT8 *line = &coreGlobals.dmdDotRaw[ii * layout->length];
     int jj,kk;
     for (jj = 2; jj >= 0; jj--)
       for (kk = 0; kk < 5; kk++) {
@@ -890,13 +910,14 @@ PINMAME_VIDEO_UPDATE(seminidmd1_update) {
     int jj;
     bits = 0;
     for (jj = 0; jj < 7; jj++)
-      bits = (bits<<2) | coreGlobals.dotCol[jj+1][ii];
+      bits = (bits<<2) | coreGlobals.dmdDotRaw[jj * layout->length + ii];
     *seg++ = bits;
   }
   if (!pmoptions.dmd_only)
-    video_update_core_dmd(bitmap, cliprect, layout);
+    core_dmd_video_update(bitmap, cliprect, layout, NULL);
   return 0;
 }
+
 // MINI DMD Type 1 (Ripley's) (3 x 5x7)
 PINMAME_VIDEO_UPDATE(seminidmd1s_update) {
   int ii,bits;
@@ -904,7 +925,7 @@ PINMAME_VIDEO_UPDATE(seminidmd1s_update) {
   UINT16 *seg = &coreGlobals.drawSeg[5*(2-jj)];
 
   for (ii = 0, bits = 0x40; ii < 7; ii++, bits >>= 1) {
-    UINT8 *line = &coreGlobals.dotCol[ii+1][0];
+    UINT8 *line = &coreGlobals.dmdDotRaw[ii * layout->length];
     int kk;
     for (kk = 0; kk < 5; kk++)
       *line++ = ((selocals.minidmd[0][jj][kk] & bits) + (selocals.minidmd[1][jj][kk] & bits) +
@@ -914,20 +935,21 @@ PINMAME_VIDEO_UPDATE(seminidmd1s_update) {
     int kk;
     bits = 0;
     for (kk = 0; kk < 7; kk++)
-      bits = (bits<<2) | coreGlobals.dotCol[kk+1][ii];
+      bits = (bits<<2) | coreGlobals.dmdDotRaw[kk * layout->length + ii];
     *seg++ = bits;
   }
   if (!pmoptions.dmd_only)
-    video_update_core_dmd(bitmap, cliprect, layout);
+    core_dmd_video_update(bitmap, cliprect, layout, NULL);
   return 0;
 }
+
 // MINI DMD Type 2 (Monopoly) (15x7)
 PINMAME_VIDEO_UPDATE(seminidmd2_update) {
   int ii,bits;
   UINT16 *seg = coreGlobals.drawSeg;
 
   for (ii = 0, bits = 0x01; ii < 7; ii++, bits <<= 1) {
-    UINT8 *line = &coreGlobals.dotCol[ii+1][0];
+    UINT8 *line = &coreGlobals.dmdDotRaw[ii * layout->length];
     int jj,kk;
     for (jj = 0; jj < 3; jj++)
       for (kk = 4; kk >= 0; kk--)
@@ -938,21 +960,22 @@ PINMAME_VIDEO_UPDATE(seminidmd2_update) {
     int jj;
     bits = 0;
     for (jj = 0; jj < 7; jj++)
-      bits = (bits<<2) | coreGlobals.dotCol[jj+1][ii];
+      bits = (bits<<2) | coreGlobals.dmdDotRaw[jj * layout->length + ii];
     *seg++ = bits;
   }
   if (!pmoptions.dmd_only)
-    video_update_core_dmd(bitmap, cliprect, layout);
+    core_dmd_video_update(bitmap, cliprect, layout, NULL);
   return 0;
 }
-// MINI DMD Type 3 (RCT) (21x5)
+
+// MINI DMD Type 3 (Roller Coaster Tycoon) (21x5)
 PINMAME_VIDEO_UPDATE(seminidmd3_update) {
   int ii,kk;
   UINT16 *seg = coreGlobals.drawSeg;
 
-  memset(coreGlobals.dotCol,0,sizeof(coreGlobals.dotCol));
+  memset(coreGlobals.dmdDotRaw,0,sizeof(coreGlobals.dmdDotRaw));
   for (kk = 0; kk < 5; kk++) {
-    UINT8 *line = &coreGlobals.dotCol[kk+1][0];
+    UINT8 *line = &coreGlobals.dmdDotRaw[kk * layout->length];
     int jj,bits;
     for (jj = 0; jj < 3; jj++)
       for (ii = 0, bits = 0x01; ii < 7; ii++, bits <<= 1)
@@ -963,43 +986,61 @@ PINMAME_VIDEO_UPDATE(seminidmd3_update) {
     int bits = 0;
     int jj;
     for (jj = 0; jj < 5; jj++)
-      bits = (bits<<2) | coreGlobals.dotCol[jj+1][ii];
+      bits = (bits<<2) | coreGlobals.dmdDotRaw[jj * layout->length + ii];
     *seg++ = bits;
   }
   if (!pmoptions.dmd_only)
-    video_update_core_dmd(bitmap, cliprect, layout);
+    core_dmd_video_update(bitmap, cliprect, layout, NULL);
   return 0;
 }
-// 3-Color MINI DMD Type 4 (Simpsons) (14x10)
+
+// 3-Color MINI DMD Type 4 (Simpsons) (2 color R/G Led matrix 14x10)
+// > encode the expected color by its index in the PinMame color palette
 PINMAME_VIDEO_UPDATE(seminidmd4_update) {
   static const int color[2][2] = {
-    { 0, 6 }, { 7, 9 } // off, green, red, yellow
+    { 0, 7 }, { 8, 10 } // off, green, red, yellow
   };
-  int ii;
-  UINT8 *line;
   UINT16 *seg = coreGlobals.drawSeg;
 
-  for (ii=0; ii < 14; ii++) {
+  for (int ii=0; ii < 14; ii++) {
     UINT16 bits1 = 0;
     UINT16 bits2 = 0;
     int kk, bits;
-    for (kk=0, bits = 0x40; kk < 7; kk++, bits >>= 1) {
+    for (kk = 0, bits = 0x40; kk < 7; kk++, bits >>= 1) {
       int isRed = (selocals.minidmd[0][ii/7][ii%7] & bits) > 0;
       int isGrn = (selocals.minidmd[1][ii/7][ii%7] & bits) > 0;
       bits1 = (bits1 << 2) | (isGrn << 1) | isRed;
-      line = &coreGlobals.dotCol[ii+1][kk];
+      UINT8* line = &coreGlobals.dmdDotRaw[ii * layout->length + kk];
       *line = color[isRed][isGrn];
       isRed = (selocals.minidmd[2][ii/7][ii%7] & bits) > 0;
       isGrn = (selocals.minidmd[3][ii/7][ii%7] & bits) > 0;
       bits2 = (bits2 << 2) | (isGrn << 1) | isRed;
-      line = &coreGlobals.dotCol[ii+1][7+kk];
+      line = &coreGlobals.dmdDotRaw[ii * layout->length + 7+kk];
       *line = color[isRed][isGrn];
     }
     *seg++ = bits1;
     *seg++ = bits2;
   }
   if (!pmoptions.dmd_only)
-    video_update_core_dmd(bitmap, cliprect, layout);
+  {
+    // Don't use core update as it expects a raw/luminance frame instead of a colored frame
+    // core_dmd_video_update(bitmap, cliprect, layout, NULL);
+    const int x = layout->left;
+    const int y = layout->top;
+    const int width = layout->length;
+    const int height = layout->start;
+    const int displaySize = pmoptions.dmd_compact ? 1 : 2;
+    BMTYPE** lines = ((BMTYPE**)bitmap->line) + (y * displaySize);
+    unsigned int o = 0;
+    for (int ii = 0; ii < height; ii++) {
+      BMTYPE* line = (*lines) + (x * displaySize);
+      for (int jj = 0; jj < width; jj++,o++) {
+        *line = coreGlobals.dmdDotRaw[o];
+        line += displaySize;
+      }
+      lines += displaySize;
+    }
+  }
   return 0;
 }
 
@@ -1013,6 +1054,7 @@ static MEMORY_READ_START(se_readmem)
   { 0x2007, 0x2007, auxboard_r },
   { 0x2008, 0x2008, lampstrb_r },
   { 0x2009, 0x2009, auxlamp_r },
+  { 0x200a, 0x200a, lampdriv_r },
   { 0x3000, 0x3000, dedswitch_r },
   { 0x3100, 0x3100, dip_r },
   { 0x3400, 0x3400, switch_r },
@@ -1026,7 +1068,7 @@ MEMORY_END
 
 static MEMORY_WRITE_START(se_writemem)
   { 0x0000, 0x1fff, ram_w },
-  { 0x2000, 0x2003, solenoid_w },
+  { 0x2000, 0x2003, se_solenoid_w },
   { 0x2006, 0x2007, auxboard_w },
   { 0x2008, 0x2008, lampstrb_w },
   { 0x2009, 0x2009, auxlamp_w },

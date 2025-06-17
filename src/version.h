@@ -3,7 +3,7 @@
 #include "git_version.h"
 
 #define VERSION_MAJOR    3 // X Digits
-#define VERSION_MINOR    6 // Max 2 Digits
+#define VERSION_MINOR    7 // Max 2 Digits
 #define VERSION_REV      0 // Max 1 Digit
 
 #define _STR(x)    #x

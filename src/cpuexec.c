@@ -7,6 +7,7 @@
 ***************************************************************************/
 
 #include <math.h>
+
 #include "driver.h"
 #include "timer.h"
 #include "state.h"
@@ -205,6 +206,8 @@ static void *interleave_boost_timer;
 static void *interleave_boost_timer_end;
 static double perfect_interleave;
 
+// PinMame: time fence global offset
+volatile double time_fence_global_offset = 0.0;
 
 
 /*************************************
@@ -409,6 +412,7 @@ void cpu_run(void)
 
 		/* loop until the user quits or resets */
 		time_to_reset = 0;
+		time_fence_global_offset = -options.time_fence;
 		while (!time_to_quit && !time_to_reset)
 		{
 			profiler_mark(PROFILER_EXTRA);
@@ -442,6 +446,7 @@ void cpu_run(void)
  *
  *************************************/
 
+void time_fence_exit();
 void cpu_exit(void)
 {
 	int cpunum;
@@ -449,6 +454,9 @@ void cpu_exit(void)
 	/* shut down the CPU cores */
 	for (cpunum = 0; cpunum < cpu_gettotalcpu(); cpunum++)
 		cpuintrf_exit_cpu(cpunum);
+
+	// PinMame
+	time_fence_exit();
 }
 
 
@@ -675,7 +683,7 @@ void cpu_loadsave_reset(void)
 	don't call it at least once every 3 seconds, the machine
 	will be reset.
 
-	The 3 seconds delay is targeted at qzshowby, which otherwise
+	The 3 seconds delay is targeted at qzshowby, which otherwise //!!
 	would reset at the start of a game.
 
 --------------------------------------------------------------*/
@@ -809,14 +817,196 @@ void cpunum_set_halt_line(int cpunum, int state)
  *
  *************************************/
 
+#if defined(_WIN32) || defined(_WIN64)
+#define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#if _MSC_VER >= 1800
+ // Windows 2000 _WIN32_WINNT_WIN2K
+ #define _WIN32_WINNT 0x0500
+#elif _MSC_VER < 1600
+ #define _WIN32_WINNT 0x0400
+#else
+ #define _WIN32_WINNT 0x0403
+#endif
+#define WINVER _WIN32_WINNT
+#endif
+#if defined(__GNUC__)
+#define LONG_MAX 2147483647
+#endif
+#include <windows.h>
+static HANDLE time_fence_semaphore = NULL;
+
+int time_fence_is_supported()
+{
+	if (time_fence_semaphore == NULL)
+	{
+		time_fence_semaphore = CreateSemaphore(NULL, 0, LONG_MAX, NULL);
+		return (time_fence_semaphore != NULL);
+	}
+	return 1;
+}
+
+void time_fence_post()
+{
+	if (time_fence_semaphore != NULL)
+		ReleaseSemaphore(time_fence_semaphore, 1, NULL);
+}
+
+int time_fence_wait(double secs)
+{
+	// Wait for the time fence semaphore (returns WAIT_OBJECT_0) or a Windows message (returns WAIT_OBJECT_0+1)
+	return time_fence_is_supported() && (MsgWaitForMultipleObjects(1, &time_fence_semaphore, FALSE, /*INFINITE*/ max((int)ceil(secs * 1000.), 1), QS_ALLINPUT) == WAIT_OBJECT_0);
+}
+
+void time_fence_exit()
+{
+	if (time_fence_semaphore != NULL)
+		CloseHandle(time_fence_semaphore);
+	time_fence_semaphore = NULL;
+
+	options.time_fence = 0.0;
+	time_fence_global_offset = 0.0;
+}
+
+
+#elif defined(__APPLE__)
+
+#include <dispatch/dispatch.h>
+static dispatch_semaphore_t time_fence_semaphore;
+static int time_fence_initialized = 0;
+static int max(int a, int b)
+{
+	return a > b ? a : b;
+}
+
+int time_fence_is_supported()
+{
+	if (!time_fence_initialized)
+	{
+		time_fence_initialized = 1;
+		time_fence_semaphore = dispatch_semaphore_create(0);
+	}
+	return 1;
+}
+
+void time_fence_post()
+{
+	if (time_fence_initialized)
+		dispatch_semaphore_signal(time_fence_semaphore);
+}
+
+int time_fence_wait(double secs)
+{
+	int64_t ns = max((int64_t)ceil(secs * 1000000000.), (int64_t)1);
+	dispatch_time_t wait_length = dispatch_time(DISPATCH_TIME_NOW, ns);
+	return time_fence_is_supported() && (dispatch_semaphore_wait(time_fence_semaphore, wait_length) == 0);
+}
+
+void time_fence_exit()
+{
+	if (time_fence_initialized)
+	{
+		dispatch_release(time_fence_semaphore);
+		time_fence_initialized = 0;
+	}
+}
+
+#else
+
+#include <semaphore.h>
+static sem_t time_fence_semaphore;
+static int time_fence_initialized = 0;
+static int max(int a, int b)
+{
+	return a > b ? a : b;
+}
+
+int time_fence_is_supported()
+{
+	if (!time_fence_initialized)
+	{
+		if (sem_init(&time_fence_semaphore, 0, 0) != 0)
+			return 0;
+		time_fence_initialized = 1;
+	}
+	return 1;
+}
+
+void time_fence_post()
+{
+	if (time_fence_initialized)
+		sem_post(&time_fence_semaphore);
+}
+
+int time_fence_wait(double secs)
+{
+	int ns = max((int)ceil(secs * 1000000000.), 1);
+	struct timespec wait_length;
+	wait_length.tv_sec = 0ul;
+	wait_length.tv_nsec = ns;
+	return time_fence_is_supported() && (sem_timedwait(&time_fence_semaphore, &wait_length) == 0);
+}
+
+void time_fence_exit()
+{
+	if (time_fence_initialized)
+	{
+		sem_destroy(&time_fence_semaphore);
+		time_fence_initialized = 0;
+	}
+}
+
+#endif
+
 static void cpu_timeslice(void)
 {
+#if defined(VPINMAME)
+	// Continuously pump message loop, otherwise it creates stutters between COM server and client (VPinMame locks VPX scripts until message are processed)
+	// It also causes a deadlock if using a TimeFence since messages are normally processed by a CPU callback that may not happen depending on the TimeFence.
+	extern void win_process_events(void);
+	win_process_events();
+#endif
+
+#if defined(LIBPINMAME)
+	extern int libpinmame_time_to_quit(void);
+	if (libpinmame_time_to_quit())
+		time_to_quit = 1;
+#endif
+
+	// PinMAME: allow external synchronization by suspending emulation when a time fence is reached
+	// NOTE: if debugging stutter issues or the like, disable this mechanism in the core scripts, or directly here
+	if (options.time_fence != 0.0 && time_fence_is_supported())
+	{
+		const double now = timer_get_time();
+		if (now - options.time_fence - time_fence_global_offset >= 0.)
+		{
+			if (now - options.time_fence - time_fence_global_offset >= 1.0)
+			{
+				// We are ahead by a large amount: realign external clock
+				time_fence_global_offset = now - options.time_fence;
+			}
+			else if (time_fence_wait(0.250))
+			{
+				// We waited and received a new time fence, but if we are still ahead of it, just return
+				if (now - options.time_fence - time_fence_global_offset >= 0.)
+					return;
+			}
+			else
+			{
+				// We waited and did not receive a new time fence, but timed out or just received an OS message, then just return
+				mame_pause(1); // we timed-out to get there, so we are stuck waiting for master clock: suspend sound (buffer would loop) and give user feedback (dimmed rendering)
+				return;
+			}
+		}
+		mame_pause(0);
+	}
+
 	double target = timer_time_until_next_timer();
-	int cpunum, ran;
-	
+	int cpunum;
+
 	LOG(("------------------\n"));
 	LOG(("cpu_timeslice: target = %.9f\n", target));
-	
+
 	/* process any pending suspends */
 	for (cpunum = 0; Machine->drv->cpu[cpunum].cpu_type != CPU_DUMMY; cpunum++)
 	{
@@ -835,21 +1025,22 @@ static void cpu_timeslice(void)
 			/* compute how long to run */
 			cycles_running = TIME_TO_CYCLES(cpunum, target - cpu[cpunum].localtime);
 			LOG(("  cpu %d: %d cycles\n", cpunum, cycles_running));
-		
+
 			/* run for the requested number of cycles */
 			if (cycles_running > 0)
 			{
+				int ran;
 				profiler_mark(PROFILER_CPU1 + cpunum);
 				cycles_stolen = 0;
 				ran = cpunum_execute(cpunum, cycles_running);
 				ran -= cycles_stolen;
 				profiler_mark(PROFILER_END);
-				
+
 				/* account for these cycles */
 				cpu[cpunum].totalcycles += ran;
 				cpu[cpunum].localtime += TIME_IN_CYCLES(ran, cpunum);
 				LOG(("         %d ran, %d total, time = %.9f\n", ran, (INT32)cpu[cpunum].totalcycles, cpu[cpunum].localtime));
-				
+
 				/* if the new local CPU time is less than our target, move the target up */
 				if (cpu[cpunum].localtime < target && cpu[cpunum].localtime > 0)
 				{
@@ -859,7 +1050,7 @@ static void cpu_timeslice(void)
 			}
 		}
 	}
-	
+
 	/* update the local times of all CPUs */
 	for (cpunum = 0; Machine->drv->cpu[cpunum].cpu_type != CPU_DUMMY; cpunum++)
 	{
@@ -874,7 +1065,7 @@ static void cpu_timeslice(void)
 			cpu[cpunum].localtime += TIME_IN_CYCLES(cycles_running, cpunum);
 			LOG(("         %d skipped, %d total, time = %.9f\n", cycles_running, (INT32)cpu[cpunum].totalcycles, cpu[cpunum].localtime));
 		}
-		
+
 		/* update the suspend state */
 		if (cpu[cpunum].suspend != cpu[cpunum].nextsuspend)
 			LOG(("--> updated CPU%d suspend from %X to %X\n", cpunum, cpu[cpunum].suspend, cpu[cpunum].nextsuspend));
@@ -884,7 +1075,7 @@ static void cpu_timeslice(void)
 		/* adjust to be relative to the global time */
 		cpu[cpunum].localtime -= target;
 	}
-	
+
 	/* update the global time */
 	timer_adjust_global_time(target);
 
@@ -909,10 +1100,10 @@ static void cpu_timeslice(void)
 void activecpu_abort_timeslice(void)
 {
 	int current_icount;
-	
+
 	VERIFY_EXECUTINGCPU_VOID(activecpu_abort_timeslice);
 	LOG(("activecpu_abort_timeslice (CPU=%d, cycles_left=%d)\n", cpu_getexecutingcpu(), activecpu_get_icount() + 1));
-	
+
 	/* swallow the remaining cycles */
 	current_icount = activecpu_get_icount() + 1;
 	cycles_stolen += current_icount;
@@ -933,7 +1124,7 @@ void activecpu_abort_timeslice(void)
 double cpunum_get_localtime(int cpunum)
 {
 	double result;
-	
+
 	VERIFY_CPUNUM(0, cpunum_get_localtime);
 
 	/* if we're active, add in the time from the current slice */
@@ -959,7 +1150,7 @@ void cpunum_suspend(int cpunum, int reason, int eatcycles)
 {
 	VERIFY_CPUNUM_VOID(cpunum_suspend);
 	LOG(("cpunum_suspend (CPU=%d, r=%X, eat=%d)\n", cpunum, reason, eatcycles));
-	
+
 	/* set the pending suspend bits, and force a resync */
 	cpu[cpunum].nextsuspend |= reason;
 	cpu[cpunum].nexteatcycles = eatcycles;
@@ -1052,7 +1243,7 @@ void cpu_boost_interleave(double timeslice_time, double boost_duration)
 	/* if you pass 0 for the timeslice_time, it means pick something reasonable */
 	if (timeslice_time < perfect_interleave)
 		timeslice_time = perfect_interleave;
-	
+
 	LOG(("cpu_boost_interleave(%.9f, %.9f)\n", timeslice_time, boost_duration));
 
 	/* adjust the interleave timer */
@@ -1104,20 +1295,6 @@ int cycles_left_to_run(void)
  *	for the active CPU or for a given CPU.
  *
  *************************************/
-
-/*--------------------------------------------------------------
-
-	IMPORTANT: this value wraps around in a relatively short
-	time. For example, for a 6MHz CPU, it will wrap around in
-	2^32/6000000 = 716 seconds = 12 minutes.
-
-	Make sure you don't do comparisons between values returned
-	by this function, but only use the difference (which will
-	be correct regardless of wraparound).
-
-	Alternatively, use the new 64-bit variants instead.
-
---------------------------------------------------------------*/
 
 UINT64 activecpu_gettotalcycles64(void)
 {
@@ -1336,7 +1513,7 @@ int cpu_getcurrentframe(void)
 void cpu_trigger(int trigger)
 {
 	int cpunum;
-	
+
 	/* cause an immediate resynchronization */
 	if (cpu_getexecutingcpu() >= 0)
 		activecpu_abort_timeslice();
@@ -1538,7 +1715,7 @@ static void cpu_vblankreset(void)
 	for (cpunum = 0; cpunum < cpu_gettotalcpu(); cpunum++)
 	{
 		if (!(cpu[cpunum].suspend & SUSPEND_REASON_DISABLE))
-			cpu[cpunum].iloops = (int)(Machine->drv->cpu[cpunum].vblank_interrupts_per_frame - 1 + 0.5);
+			cpu[cpunum].iloops = (int)(Machine->drv->cpu[cpunum].vblank_interrupts_per_frame + (- 1 + 0.5));
 		else
 			cpu[cpunum].iloops = -1;
 	}
@@ -1580,8 +1757,8 @@ static void cpu_vblankcallback(int param)
 {
 	int cpunum;
 
-   if (vblank_countdown == 1)
-      vblank = 1;
+	if (vblank_countdown == 1)
+		vblank = 1;
 
 	/* loop over CPUs */
 	for (cpunum = 0; cpunum < cpu_gettotalcpu(); cpunum++)
@@ -1904,4 +2081,3 @@ static void cpu_inittimers(void)
 	}
 	timer_set(first_time, 0, cpu_firstvblankcallback);
 }
-

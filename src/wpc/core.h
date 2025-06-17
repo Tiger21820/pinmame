@@ -211,8 +211,6 @@
 #define DMD_MAXX 256
 #define DMD_MAXY 64
 
-typedef UINT8 tDMDDot[DMD_MAXY+2][DMD_MAXX+2];
-
 /* Shortcuts for some common display sizes */
 #define DISP_SEG_16(row,type)    {4*(row), 0, 20*(row), 16, type}
 #define DISP_SEG_7(row,col,type) {4*(row),16*(col),(row)*20+(col)*8+1,7,type}
@@ -229,46 +227,71 @@ struct core_dispLayout {
   const struct core_dispLayout *lptr;	// for DISP_SEG_IMPORT(x) with flag CORE_IMPORT
 };
 typedef struct core_dispLayout core_tLCDLayout, *core_ptLCDLayout;
+// Overall alphanumeric display layout. Used externally by VPinMame's dmddevice. Don't change order
+typedef enum {
+   CORE_SEGLAYOUT_None,
+   CORE_SEGLAYOUT_2x16Alpha,
+   CORE_SEGLAYOUT_2x20Alpha,
+   CORE_SEGLAYOUT_2x7Alpha_2x7Num,
+   CORE_SEGLAYOUT_2x7Alpha_2x7Num_4x1Num,
+   CORE_SEGLAYOUT_2x7Num_2x7Num_4x1Num,
+   CORE_SEGLAYOUT_2x7Num_2x7Num_10x1Num,
+   CORE_SEGLAYOUT_2x7Num_2x7Num_4x1Num_gen7,
+   CORE_SEGLAYOUT_2x7Num10_2x7Num10_4x1Num,
+   CORE_SEGLAYOUT_2x6Num_2x6Num_4x1Num,
+   CORE_SEGLAYOUT_2x6Num10_2x6Num10_4x1Num,
+   CORE_SEGLAYOUT_4x7Num10,
+   CORE_SEGLAYOUT_6x4Num_4x1Num,
+   CORE_SEGLAYOUT_2x7Num_4x1Num_1x16Alpha,
+   CORE_SEGLAYOUT_1x16Alpha_1x16Num_1x7Num,
+   CORE_SEGLAYOUT_1x7Num_1x16Alpha_1x16Num,
+   CORE_SEGLAYOUT_1x16Alpha_1x16Num_1x7Num_1x4Num,
+   CORE_SEGLAYOUT_Invalid
+} core_segOverallLayout_t;
+
 
 #define PINMAME_VIDEO_UPDATE(name) int (name)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout)
 typedef int (*ptPinMAMEvidUpdate)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout);
-extern void video_update_core_dmd(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout);
 
-/*----------------------
+/*---------------------------------------
 / WPC driver constants
-/--------------------------------*/
-/*      Solenoid numbering       */
-/*                               */
-/*       WPC                     */
-/*  1-28 Standard                */
-/* 33-36 Upper flipper solenoids */
-/* 37-40 Standard (WPC95 only)   */
-/* 41-44 - "" - Copy of above    */
-/* 45-48 Lower flipper solenoids */
-/* 49-50 Simulated               */
-/* 51-64                         */
-/*                               */
-/*       S9/S11                  */
-/*  1- 8 Standard 'A'-side       */
-/*  9-16 Standard                */
-/* 17-22 Special                 */
-/* 23    Flipper & SS Enabled Sol (fake) */
-/* 25-32 Standard 'C'-side       */
-/* 37-41 Sound overlay board     */
-/*                               */
-/*       S7                      */
-/*  1-16 Standard                */
-/* 17-24 Special                 */
+/----------------------------------------*/
+/*      Solenoid numbering               */
+/*                                       */
+/*       WPC                             */
+/*  1-28 Standard                        */
+/* 29-31 GameOn (3 highest bit of GI reg)*/
+/* 32    Unused (always 0)               */
+/* 33-36 Upper flipper solenoids         */
+/* 37-40 LPDC WPC95 controlled outputs   */
+/* 41-44 Copy of 37-40 for backward comp.*/
+/* 45-48 Lower flipper solenoids         */
+/* 49    Fake solenoid for ball shooter  */
+/* 50    Reserved                        */
+/* 51-58 8 drivers Aux Board or custom   */
+/* 59-64 custom                          */
+/*                                       */
+/*       S9/S11                          */
+/*  1- 8 Standard 'A'-side               */
+/*  9-16 Standard                        */
+/* 17-22 Special                         */
+/* 23    Flipper & Switched Sol. Enable  */
+/* 25-32 Standard 'C'-side               */
+/* 37-41 Sound overlay board             */
+/*                                       */
+/*       S7                              */
+/*  1-16 Standard                        */
+/* 17-24 Special                         */
 /* 25    Flipper & SS Enabled Sol (fake) */
-/*                               */
-/*       BY17/BY35               */
-/*  1-15 Standard Pulse          */
-/* 17-20 Standard Hold           */
-/*                               */
-/*       GTS80                   */
-/*  1- 9 Standard                */
-/* 10    GameOn (fake)           */
-/* 11    Tilt (for GI) (fake)    */
+/*                                       */
+/*       BY17/BY35                       */
+/*  1-15 Standard Pulse                  */
+/* 17-20 Standard Hold                   */
+/*                                       */
+/*       GTS80                           */
+/*  1- 9 Standard                        */
+/* 10    GameOn (fake)                   */
+/* 11    Tilt (for GI) (fake)            */
 #define CORE_FIRSTEXTSOL   37
 #define CORE_FIRSTUFLIPSOL 33
 #define CORE_FIRSTCUSTSOL  51
@@ -398,10 +421,14 @@ extern void video_update_core_dmd(struct mame_bitmap *bitmap, const struct recta
 #define CORE_MODOUT_BULB_44_18V_DC_S11   203 /* Incandescent #44/555 Bulb connected to 18V, commonly used for lamp matrix with short strobing */
 #define CORE_MODOUT_BULB_44_18V_DC_SE    204 /* Incandescent #44/555 Bulb connected to 18V, commonly used for lamp matrix with short strobing */
 #define CORE_MODOUT_BULB_44_20V_DC_CC    205 /* Incandescent #44/555 Bulb connected to 18V, commonly used for lamp matrix with short strobing */
-#define CORE_MODOUT_BULB_89_20V_DC_WPC   301 /* Incandescent #89/906 Bulb connected to 20V, commonly used for flashers */
-#define CORE_MODOUT_BULB_89_20V_DC_GTS3  302 /* Incandescent #89/906 Bulb connected to 20V, commonly used for flashers */
-#define CORE_MODOUT_BULB_89_32V_DC_S11   303 /* Incandescent #89/906 Bulb connected to 32V, used for flashers on S11 with output strobing */
-#define CORE_MODOUT_BULB_89_25V_DC_S11   304 /* Incandescent #89/906 Bulb connected to 25V, used for flashers on S11 with output strobing */
+#define CORE_MODOUT_BULB_89_20V_DC_WPC   301 /* Incandescent #89 Bulb connected to 20V, commonly used for flashers */
+#define CORE_MODOUT_BULB_89_20V_DC_GTS3  302 /* Incandescent #89 Bulb connected to 20V, commonly used for flashers */
+#define CORE_MODOUT_BULB_89_32V_DC_S11   303 /* Incandescent #89 Bulb connected to 32V, used for flashers on S11 with output strobing */
+#define CORE_MODOUT_BULB_89_25V_DC_S11   304 /* Incandescent #89 Bulb connected to 25V, used for flashers on S11 with output strobing */
+#define CORE_MODOUT_BULB_906_20V_DC_WPC  311 /* Incandescent #906 Bulb connected to 20V, commonly used for flashers */
+#define CORE_MODOUT_BULB_906_20V_DC_GTS3 312 /* Incandescent #906 Bulb connected to 20V, commonly used for flashers */
+#define CORE_MODOUT_BULB_906_32V_DC_S11  313 /* Incandescent #906 Bulb connected to 32V, used for flashers on S11 with output strobing */
+#define CORE_MODOUT_BULB_906_25V_DC_S11  314 /* Incandescent #906 Bulb connected to 25V, used for flashers on S11 with output strobing */
 #define CORE_MODOUT_LED                  400 /* LED PWM (in fact mostly human eye reaction, since LED are nearly instantaneous) */
 #define CORE_MODOUT_LED_STROBE_1_10MS    401 /* LED Strobed 1ms over 10ms for full power */
 #define CORE_MODOUT_LED_STROBE_1_5MS     402 /* LED Strobed 1ms over 5ms for full power */
@@ -428,8 +455,9 @@ typedef struct {
   core_tLampData lamps[CORE_MAXLAMPCOL*8];      /*Can support up to 160 lamps!*/
 } core_tLampDisplay;
 
-typedef void (*core_tPhysOutputIntegrator)(const double, const int, const int);
+typedef void (*core_tPhysOutputIntegrator)(const double, const int, const int, const int);
 
+#define FLIP_BUFFER_SIZE 32               /* Number of state considered for PWM integration. Must be even (and should a power of 2 for performance reason) */
 typedef struct {
    int type;                              /* Type of modulation from CORE_MODOUT_ definitions */
    float value;                           /* Last computed output main physical characteristic (relative brightness for bulbs, strength for solenoids,...) */
@@ -457,6 +485,9 @@ typedef struct {
          float switchDownLatency;
       } sol; // Physical model of a solenoid
    } state;
+   double flipTimeStamps[FLIP_BUFFER_SIZE];
+   unsigned int flipBufferPos;
+   unsigned int lastIntegrationFlipPos;
 } core_tPhysicOutput;
 
 #ifdef LSB_FIRST
@@ -477,14 +508,15 @@ typedef struct {
   core_tSeg segments;                                           /* Segments data from driver */
   UINT16 drawSeg[CORE_SEGCOUNT];                                /* Segments drawn */
   /*-- DMD --*/
-  tDMDDot dotCol;                                               /* Raw DMD dots */
+  UINT8 dmdDotRaw[DMD_MAXY * DMD_MAXX];                         /* DMD: 'raw' dots, that is to say frame built up from rasterized frames (depends on each driver), stable result that can be used for post processing (colorization, ...) */
+  UINT8 dmdDotLum[DMD_MAXY * DMD_MAXX];                         /* DMD: perceived linear luminance computed from PWM frames, for rendering (result may change and can't be considered as stable) */
   /*-- Solenoids --*/
   volatile UINT32 pulsedSolState;                               /* Current pulse binary value of solenoids on driver board */
   volatile UINT32 solenoids;                                    /* Current integrated binary On/Off value of solenoids on driver board (not pulsed, averaged over a period depending on the driver) */
   volatile UINT32 solenoids2;                                   /* Current integrated binary On/Off value of additional solenoids, including flipper solenoids (not pulsed, averaged over a period depending on the driver) */
   UINT64 flipperCoils;                                          /* Coil mapping of flipper power/hold coils => TODO move to core_gameData */
   /*-- GI --*/
-  volatile int   gi[CORE_MAXGI];                                /* WPC GI strings state */
+  volatile int   gi[CORE_MAXGI];                                /* WPC, Whitestar and SAM GI strings state */
   /*-- Generalized outputs --*/
   int nSolenoids, nLamps, nGI, nAlphaSegs;                      /* Number of physical outputs the driver handles */
   double lastACZeroCrossTimeStamp;                              /* Last time AC did cross 0 as reported by the driver (should be 120Hz) */
@@ -503,7 +535,7 @@ typedef struct {
 extern core_tGlobals coreGlobals;
 /* shortcut for coreGlobals */
 #define cg coreGlobals
-extern struct pinMachine *coreData;
+extern volatile struct pinMachine *coreData;
 /*Exported variables*/
 /*-- There are no custom fields in the game driver --*/
 /*-- so I have to invent some by myself. Each driver --*/
@@ -520,7 +552,7 @@ typedef struct {
     int  (*getSol)(int solNo);        /* get state of custom solenoid */
     void (*handleMech)(int mech);     /* update switches depending on playfield mechanics */
     int  (*getMech)(int mechNo);      /* get status of mechanics */
-    void (*drawMech)(BMTYPE **line); /* draw game specific hardware */
+    void (*drawMech)(BMTYPE **line);  /* draw game specific hardware */
     core_tLampDisplay *lampData;      /* lamp layout */
 #ifdef ENABLE_MECHANICAL_SAMPLES
     wpc_tSamSolMap   *solsammap;      /* solenoids samples */
@@ -541,12 +573,12 @@ typedef struct {
 } core_tGameData;
 extern const core_tGameData *core_gameData;
 
-extern const int core_bcd2seg9[]; /* BCD to 9 segment display */
+extern const int core_bcd2seg9[];  /* BCD to 9 segment display */
 extern const int core_bcd2seg9a[]; /* BCD to 9 segment display, missing 6 top line */
-extern const int core_bcd2seg7[]; /* BCD to 7 segment display */
+extern const int core_bcd2seg7[];  /* BCD to 7 segment display */
 extern const int core_bcd2seg7a[]; /* BCD to 7 segment display, missing 6 top line */
 extern const int core_bcd2seg7e[]; /* BCD to 7 segment display with A to E letters */
-extern const UINT16 core_ascii2seg16[]; /* BCD to regular 16 segment display */
+extern const UINT16 core_ascii2seg16[];  /* BCD to regular 16 segment display */
 extern const UINT16 core_ascii2seg16s[]; /* BCD to 16 segment display with split top / botom lines */
 #define core_bcd2seg  core_bcd2seg7
 
@@ -554,12 +586,12 @@ extern const UINT16 core_ascii2seg16s[]; /* BCD to 16 segment display with split
 void core_updateSw(int flipEn);
 
 /*-- text output functions --*/
-void core_textOut(char *buf, int length, int x, int y, int color);
+void core_textOut(const char *buf, int length, int x, int y, int color);
 void CLIB_DECL core_textOutf(int x, int y, int color, const char *text, ...);
 
 /*-- lamp handling --*/
-void core_setLamp(UINT8 *lampMatrix, int col, int row);
-void core_setLampBlank(UINT8 *lampMatrix, int col, int row);
+void core_setLamp(volatile UINT8 *lampMatrix, int col, int row);
+void core_setLampBlank(volatile UINT8 *lampMatrix, int col, int row);
 
 /*-- switch handling --*/
 extern void core_setSw(int swNo, int value);
@@ -576,7 +608,11 @@ extern UINT64 core_getAllSol(void);
 extern void core_getAllPhysicSols(float* const state);
 
 /*-- AC sync and PWM integration --*/
-extern void core_request_pwm_output_update(void);
+extern void core_update_pwm_outputs(const int startIndex, const int count);
+INLINE void core_update_pwm_gis(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_GI)) core_update_pwm_outputs(CORE_MODOUT_GI0, coreGlobals.nGI); }
+INLINE void core_update_pwm_solenoids(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL)) core_update_pwm_outputs(CORE_MODOUT_SOL0, coreGlobals.nSolenoids); }
+INLINE void core_update_pwm_segments(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_ALPHASEGS)) core_update_pwm_outputs(CORE_MODOUT_SEG0, coreGlobals.nAlphaSegs); }
+INLINE void core_update_pwm_lamps(void) { if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_LAMPS)) core_update_pwm_outputs(CORE_MODOUT_LAMP0, coreGlobals.nLamps); }
 extern void core_set_pwm_output_type(int startIndex, int count, int type);
 extern void core_set_pwm_output_types(int startIndex, int count, int* outputTypes);
 extern void core_set_pwm_output_bulb(int startIndex, int count, int bulb, float U, int isAC, float serial_R, float relative_brightness);
@@ -586,21 +622,68 @@ extern void core_write_masked_pwm_output_8b(int startIndex, UINT8 bitStates, UIN
 extern void core_write_pwm_output_lamp_matrix(int startIndex, UINT8 columns, UINT8 rows, int nCols);
 INLINE void core_zero_cross(void) { coreGlobals.lastACZeroCrossTimeStamp = timer_get_time(); }
 
+/*-- DMD PWM integration --*/
+typedef struct {
+  // Definition initialized at startup using 'core_dmd_pwm_init' then unmutable
+  int     width;              // DMD width
+  int     height;             // DMD height
+  int     revByte;            // Is bitset reversed ?
+  int     frameSize;          // Size of a DMD frame in bytes (width * height)
+  int     rawFrameSize;       // Size of a raw DMD frame in bytes (width * height / 8)
+  int     nFrames;            // Number of frames to store and consider to create shades (depends on hardware refresh frequency and used PWM patterns)
+  int     raw_combiner;       // CORE_DMD_PWM_COMBINER_... enum that defines how to combine bitplanes to create multi plane raw frame for colorization plugin
+  int     fir_size;           // Selected filter (depends on hardware refresh frequency and number of stored frames)
+  const UINT32* fir_weights;  // Selected filter (depends on hardware refresh frequency and number of stored frames)
+  UINT32  fir_sum;            // Sum of filter weights
+  // Data acquisition, feeded by the driver through 'core_dmd_submit_frame'
+  UINT8*  rawFrames;          // Buffer for incoming raw frames
+  int     nextFrame;          // Position in circular buffer to store next raw frame
+  UINT32* shadedFrame;        // Shaded frame computed from raw frames
+  unsigned int frame_index;   // Raw frame index
+  // Integrated data, computed by 'core_dmd_update_pwm'
+  UINT8*  bitplaneFrame;      // DMD: bitplane frame built up from raw rasterized frames (depends on each driver, stable result that can be used for post processing like colorization, ...)
+  UINT8*  luminanceFrame;     // DMD: linear luminance computed from PWM frames, for rendering (result may change and can't be considered as stable accross PinMame builds)
+} core_tDMDPWMState;
+
+#define CORE_DMD_PWM_FILTER_DE_128x16   0
+#define CORE_DMD_PWM_FILTER_DE_128x32   1
+#define CORE_DMD_PWM_FILTER_DE_192x64   2
+#define CORE_DMD_PWM_FILTER_GTS3        3
+#define CORE_DMD_PWM_FILTER_WPC         4
+#define CORE_DMD_PWM_FILTER_WPC_PH      5
+#define CORE_DMD_PWM_FILTER_ALVG1       6
+#define CORE_DMD_PWM_FILTER_ALVG2       7
+
+#define CORE_DMD_PWM_COMBINER_GTS3_4C_A 0
+#define CORE_DMD_PWM_COMBINER_GTS3_4C_B 1
+#define CORE_DMD_PWM_COMBINER_GTS3_5C   2
+#define CORE_DMD_PWM_COMBINER_SUM_2     3
+#define CORE_DMD_PWM_COMBINER_SUM_3     4
+#define CORE_DMD_PWM_COMBINER_SUM_2_1   5
+#define CORE_DMD_PWM_COMBINER_SUM_1_2   6
+#define CORE_DMD_PWM_COMBINER_SUM_4     7
+
+extern void core_dmd_pwm_init(core_tDMDPWMState* dmd_state, const int width, const int height, const int filter, const int raw_combiner);
+extern void core_dmd_pwm_exit(core_tDMDPWMState* dmd_state);
+extern void core_dmd_submit_frame(core_tDMDPWMState* dmd_state, const UINT8* frame, const int ntimes);
+extern void core_dmd_update_pwm(core_tDMDPWMState* dmd_state);
+extern void core_dmd_video_update(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout, core_tDMDPWMState* dmd_state);
+
 extern void core_sound_throttle_adj(int sIn, int *sOut, int buffersize, double samplerate);
 
 /*-- nvram handling --*/
 extern void core_nvram(void *file, int write, void *mem, size_t length, UINT8 init);
 
 /* makes it easier to swap bits */
+#if defined(_M_ARM64) || defined(__aarch64__)
+#define core_revnyb __brevnyb
+#define core_revbyte __brevc
+#else
 extern const UINT8 core_swapNyb[16];
-INLINE UINT8 core_revbyte(UINT8 x) { return (core_swapNyb[x & 0xf]<<4)|(core_swapNyb[x>>4]); }
-INLINE UINT8 core_revnyb(UINT8 x) { return core_swapNyb[x]; }
-INLINE UINT16 core_revword(UINT16 x) {
-	UINT8 lo,hi;
-	lo = core_revbyte(x & 0x00ff);
-	hi = core_revbyte((x & 0xff00)>>8);
-	return ((lo<<8) | hi);
-}
+INLINE UINT8 core_revnyb(UINT8 x)  { return core_swapNyb[x]; }
+INLINE UINT8 core_revbyte(UINT8 x) { return (core_swapNyb[x & 0xf] << 4) | (core_swapNyb[x >> 4]); }
+#endif
+#define core_revword __brevs
 
 /*-- core DIP handling --*/
 //  Get the status of a DIP bank (8 dips)

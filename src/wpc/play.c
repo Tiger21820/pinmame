@@ -110,7 +110,7 @@ static void PLAYMATIC_zeroCross2(int data) {
 /--------------------------------*/
 static INTERRUPT_GEN(PLAYMATIC_vblank1) {
   /*-- lamps --*/
-  memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+  memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
   /*-- solenoids --*/
   coreGlobals.solenoids = (coreGlobals.solenoids & 0x0ffff) | (locals.q << 16);
 
@@ -119,7 +119,7 @@ static INTERRUPT_GEN(PLAYMATIC_vblank1) {
 
 static INTERRUPT_GEN(PLAYMATIC_vblank2) {
   /*-- lamps --*/
-  memcpy(coreGlobals.lampMatrix, coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
+  memcpy((void*)coreGlobals.lampMatrix, (void*)coreGlobals.tmpLampMatrix, sizeof(coreGlobals.tmpLampMatrix));
   /*-- solenoids --*/
   locals.vblankCount = (locals.vblankCount + 1) % 2;
   if (!locals.vblankCount) {
@@ -374,7 +374,7 @@ static WRITE_HANDLER(m8020_w) {
 
 static MACHINE_INIT(PLAYMATIC3) {
   init_common(2);
-  if (!strncasecmp(Machine->gamedrv->name, "spain82", 7)) {
+  if (strncasecmp(Machine->gamedrv->name, "spain82", 7) == 0) {
     install_mem_write_handler(0, 0x8020, 0x8020, m8020_w);
   }
 }

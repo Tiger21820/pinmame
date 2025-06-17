@@ -9,7 +9,7 @@
 	01/09/26 (SJE): Added Check to see if Invalid CRC games can be run.
 	03/09/22 (SJE): Added IMPERFECT GRAPHICS FLAG and reworked code to allow more than 1 message to display together
 
-  PinMame runs on another thread than the controller without blocking synchronization primitives. Therefore when getters are called,
+  PinMAME runs on another thread than the controller without blocking synchronization primitives. Therefore when getters are called,
   the return value is the last known state. For lazy updated values like physic outputs, getters also trigger an update that will be
   serviced asynchronously. The theory of operation is that these getters are to be called repeatedly to update/get the actual value.
 */
@@ -48,8 +48,8 @@ extern int g_cpu_affinity_mask;
 extern char g_fShowWinDMD;
 extern char g_szGameName[256];
 
-// from ticker.c
-extern void uSleep(const UINT64 u);
+extern UINT8 g_VPM_ignore_pwm_segments_update;
+
 // from snd_alt.h
 #ifdef VPINMAME_ALTSOUND
  extern void alt_sound_pause(BOOL pause);
@@ -96,11 +96,11 @@ STDMETHODIMP CController::InterfaceSupportsErrorInfo(REFIID riid)
 void CController::GetProductVersion(int *nVersionNo0, int *nVersionNo1, int *nVersionNo2, int *nVersionNo3)
 {
 	DWORD   dwVerHandle; 
-	DWORD	dwInfoSize;
+	DWORD   dwInfoSize;
 	HANDLE  hVersionInfo;
 	LPVOID  lpEntryInfo;
 	UINT    wVarSize;
-	
+
 	VS_FIXEDFILEINFO *pFixedFileInfo;
 
 	char szFilename[MAX_PATH];
@@ -229,7 +229,7 @@ STDMETHODIMP CController::Run(/*[in]*/ LONG_PTR hParentWnd, /*[in,defaultvalue(1
 	GetProductVersion(&nVersionNo0, &nVersionNo1, NULL, NULL);
 
 	if ( (nVersionNo0*100+nVersionNo1)<nMinVersion )
-		return Error(TEXT("You need a newer version of Visual PinMame to run this emulation!"));
+		return Error(TEXT("You need a newer version of Visual PinMAME to run this emulation!"));
 
 	if ( m_hThreadRun!=INVALID_HANDLE_VALUE ) {
 		if ( WaitForSingleObject(m_hThreadRun, 0)==WAIT_TIMEOUT )
@@ -291,7 +291,6 @@ STDMETHODIMP CController::Run(/*[in]*/ LONG_PTR hParentWnd, /*[in,defaultvalue(1
 
 		if(!cabinetMode) {
 		if ( fFirstTime ) {
-			char szTemp[256];
 			sprintf(szTemp,"This is the first time you use: %s\nPlease specify options for this game by clicking \"OK\"!",drivers[m_nGameNo]->description);
 			MessageBox(GetActiveWindow(),szTemp,"Notice!",MB_OK | MB_ICONINFORMATION);
 			m_pGameSettings->ShowSettingsDlg(0);
@@ -313,7 +312,7 @@ STDMETHODIMP CController::Run(/*[in]*/ LONG_PTR hParentWnd, /*[in,defaultvalue(1
 		return Error(TEXT(szTemp));
 	}
 
-		//Any game messages to display (messages that allow game to continue)
+	//Any game messages to display (messages that allow game to continue)
 	if ( drivers[m_nGameNo]->flags )
 	{
 		sprintf(szTemp,"");
@@ -380,6 +379,9 @@ STDMETHODIMP CController::Stop()
 	if ( m_hThreadRun==INVALID_HANDLE_VALUE )
 		return S_OK;
 
+	// Disable time fence that could prevent the machine to stop
+	put_TimeFence(0.0);
+
 	PostMessage(win_video_window, WM_CLOSE, 0, 0);
 	WaitForSingleObject(m_hThreadRun,INFINITE);
 	
@@ -401,7 +403,7 @@ STDMETHODIMP CController::get_Lamp(int nLamp, VARIANT_BOOL *pVal)
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     *pVal= false;
   else {
-    core_request_pwm_output_update();
+    core_update_pwm_lamps();
     *pVal = vp_getLamp(nLamp)?VARIANT_TRUE:VARIANT_FALSE;
   }
 
@@ -418,7 +420,7 @@ STDMETHODIMP CController::get_Solenoid(int nSolenoid, VARIANT_BOOL *pVal)
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     *pVal= false;
   else {
-    core_request_pwm_output_update();
+    core_update_pwm_solenoids();
     *pVal = vp_getSolenoid(nSolenoid)?VARIANT_TRUE:VARIANT_FALSE;
   }
   return S_OK;
@@ -481,7 +483,7 @@ STDMETHODIMP CController::get_WPCNumbering(/*[out, retval]*/ VARIANT_BOOL *pVal)
 		*pVal= 0;
 	else
 		*pVal = vp_getWPCNumbering()?VARIANT_TRUE:VARIANT_FALSE;
-	
+
 	return S_OK;
 }
 
@@ -493,13 +495,13 @@ STDMETHODIMP CController::get_Lamps(VARIANT *pVal)
 	if ( !pVal )
 		return S_FALSE;
 
-	core_request_pwm_output_update();
-
 	SAFEARRAY *psa = SafeArrayCreateVector(VT_VARIANT, 0, 89);
 
 	VARIANT* pData;
 	SafeArrayAccessData(psa, (void**)&pData);
 	const bool timeout = (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT);
+	if (!timeout)
+		core_update_pwm_lamps();
 	for (int i = timeout ? 11 : 0; i < 89; ++i)
 	{
 		pData[i].vt = VT_BOOL;
@@ -615,7 +617,7 @@ STDMETHODIMP CController::get_ChangedNVRAM(VARIANT *pVal)
 		uCount = min((size_t)nvram_file->offset, CORE_MAXNVRAM);
 		for (size_t i = 0; i < uCount; ++i)
 		{
-			chgNVRAMs[i].nvramNo = i;
+			chgNVRAMs[i].nvramNo = (int)i;
 			chgNVRAMs[i].oldStat = 0; //!!
 			chgNVRAMs[i].currStat = nvram_file->data[i];
 		}
@@ -638,7 +640,7 @@ STDMETHODIMP CController::get_ChangedNVRAM(VARIANT *pVal)
 		{
 			if (oldNVRAM[i] != nvram_file->data[i])
 			{
-				chgNVRAMs[uCount].nvramNo = i;
+				chgNVRAMs[uCount].nvramNo = (int)i;
 				chgNVRAMs[uCount].oldStat = oldNVRAM[i];
 				chgNVRAMs[uCount].currStat = nvram_file->data[i];
 				uCount++;
@@ -735,7 +737,7 @@ STDMETHODIMP CController::get_RawDmdColoredPixels(VARIANT *pVal)
 		pVal->parray = psa;
 
 		g_needs_DMD_update = 0;
-		
+
 		return S_OK;
 	}
 	else
@@ -857,19 +859,18 @@ STDMETHODIMP CController::get_updateDmdPixels(int **buf, int width, int height, 
  *****************************************************************************************/
 STDMETHODIMP CController::get_ChangedLampsState(int **buf, int *pVal)
 {
-	if(!buf)
-	{
-		*pVal = 0;
-		return S_FALSE;
-	}
+  if(!buf)
+  {
+    *pVal = 0;
+    return S_FALSE;
+  }
 
   if (!pVal) return S_FALSE;
 
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     { *pVal = 0; return S_OK; }
 
-  /*-- Request an update that will be processed asynchronously --*/
-  core_request_pwm_output_update();
+  core_update_pwm_lamps();
 
   /*-- Count changes --*/
   vp_tChgLamps chgLamps;
@@ -904,17 +905,16 @@ STDMETHODIMP CController::get_LampsState(int **buf, int *pVal)
 
 	if (!pVal) return S_FALSE;
 
-	/*-- Request an update that will be processed asynchronously --*/
-	core_request_pwm_output_update();
-
 	/*-- list lamps states to array --*/
 	int *dst = reinterpret_cast<int*>(buf);
 
+	// FIXME this implementation supposes that the lamp array has 89 lamps which is wrong
 	if ( WaitForSingleObject(m_hEmuIsRunning, 0)==WAIT_TIMEOUT ) {
 		for (int ix=0; ix<89; ix++)
 			*(dst++) = 0;
 	}
 	else {
+		core_update_pwm_lamps();
 		for (int ix=0; ix<89; ix++)
 			*(dst++) = vp_getLamp(ix) ? 1:0;
 	}
@@ -940,8 +940,7 @@ STDMETHODIMP CController::get_ChangedSolenoidsState(int **buf, int *pVal)
 	if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
 	{ *pVal = 0; return S_OK; }
 
-	/*-- Request an update that will be processed asynchronously --*/
-	core_request_pwm_output_update();
+	core_update_pwm_solenoids();
 
 	/*-- Count changes --*/
 	vp_tChgSols chgSol;
@@ -977,9 +976,6 @@ STDMETHODIMP CController::get_SolenoidsState(int **buf, int *pVal)
 
 	if (!pVal) return S_FALSE;
 
-	/*-- Request an update that will be processed asynchronously --*/
-	core_request_pwm_output_update();
-
 	/*-- list lamps states to array --*/
 	int *dst = reinterpret_cast<int*>(buf);
 
@@ -988,6 +984,7 @@ STDMETHODIMP CController::get_SolenoidsState(int **buf, int *pVal)
 			*(dst++) = 0;
 	}
 	else {
+		core_update_pwm_solenoids();
 		for (int ix=0; ix<65; ix++)
 			*(dst++) = vp_getSolenoid(ix);
 	}
@@ -1015,8 +1012,7 @@ STDMETHODIMP CController::get_ChangedGIsState(int **buf, int *pVal)
 	if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
 	{ *pVal = 0; return S_OK; }
 
-	/*-- Request an update that will be processed asynchronously --*/
-	core_request_pwm_output_update();
+	core_update_pwm_gis();
 
 	/*-- Count changes --*/
 	int uCount = vp_getChangedGI(chgGI);
@@ -1270,8 +1266,7 @@ STDMETHODIMP CController::get_ChangedLamps(VARIANT *pVal)
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     { pVal->vt = 0; return S_OK; }
 
-  /*-- Request an update that will be processed asynchronously --*/
-  core_request_pwm_output_update();
+  core_update_pwm_lamps();
 
   /*-- Count changes --*/
   int uCount = vp_getChangedLamps(chgLamps);
@@ -1314,8 +1309,8 @@ STDMETHODIMP CController::get_ChangedLEDs(int nHigh, int nLow, int nnHigh, int n
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     { pVal->vt = 0; return S_OK; }
 
-  /*-- Request an update that will be processed asynchronously --*/
-  core_request_pwm_output_update();
+  if (!g_VPM_ignore_pwm_segments_update)
+    core_update_pwm_segments();
 
   /*-- Count changes --*/
   int uCount = vp_getChangedLEDs(chgLED, mask, mask2);
@@ -1371,8 +1366,8 @@ STDMETHODIMP CController::get_ChangedLEDsState(int nHigh, int nLow, int nnHigh, 
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     { *pVal = 0; return S_OK; }
 
-  /*-- Request an update that will be processed asynchronously --*/
-  core_request_pwm_output_update();
+  if (!g_VPM_ignore_pwm_segments_update)
+    core_update_pwm_segments();
 
   /*-- Count changes --*/
   int uCount = vp_getChangedLEDs(chgLED, mask, mask2);
@@ -1465,7 +1460,7 @@ STDMETHODIMP CController::get_GIString(int nString, int *pVal) {
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     *pVal = 0;
   else {
-    core_request_pwm_output_update();
+    core_update_pwm_gis();
     *pVal = vp_getGI(nString);
   }
 
@@ -1485,8 +1480,7 @@ STDMETHODIMP CController::get_ChangedGIStrings(VARIANT *pVal) {
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
     { pVal->vt = 0; return S_OK; }
 
-  /*-- Request an update that will be processed asynchronously --*/
-  core_request_pwm_output_update();
+  core_update_pwm_gis();
 
   int uCount = vp_getChangedGI(chgGI);
 
@@ -1531,8 +1525,7 @@ STDMETHODIMP CController::get_ChangedSolenoids(VARIANT *pVal)
   if (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT)
 	{ pVal->vt = 0; return S_OK; }
 
-  /*-- Request an update that will be processed asynchronously --*/
-  core_request_pwm_output_update();
+  core_update_pwm_solenoids();
 
   /*-- Count changed solenoids --*/
   int uCount = vp_getChangedSolenoids(chgSol);
@@ -1592,14 +1585,13 @@ STDMETHODIMP CController::get_Solenoids(VARIANT *pVal)
 	if ( !pVal )
 		return S_FALSE;
 
-	/*-- Request an update that will be processed asynchronously --*/
-	core_request_pwm_output_update();
-
 	SAFEARRAY *psa = SafeArrayCreateVector(VT_VARIANT, 0, 65);
 
 	VARIANT* pData;
 	SafeArrayAccessData(psa, (void**)&pData);
 	const bool timeout = (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT);
+	if (!timeout)
+		core_update_pwm_solenoids();
 	for (int i = 0; i < 65; ++i)
 	{
 		pData[i].vt = VT_BOOL;
@@ -1641,14 +1633,13 @@ STDMETHODIMP CController::get_GIStrings(VARIANT *pVal)
 	if ( !pVal )
 		return S_FALSE;
 
-	/*-- Request an update that will be processed asynchronously --*/
-	core_request_pwm_output_update();
-
 	SAFEARRAY *psa = SafeArrayCreateVector(VT_VARIANT, 0, CORE_MAXGI);
 
 	VARIANT* pData;
 	SafeArrayAccessData(psa, (void**)&pData);
 	const bool timeout = (WaitForSingleObject(m_hEmuIsRunning, 0) == WAIT_TIMEOUT);
+	if (!timeout)
+		core_update_pwm_gis();
 	for (int i = 0; i < CORE_MAXGI; ++i)
 	{
 		pData[i].vt = VT_I4;
@@ -1732,6 +1723,17 @@ STDMETHODIMP CController::put_ModOutputType(int output, int no, int newVal)
 }
 
 /****************************************************************************
+ * IController.TimeFence property: sets a time marker that suspend the 
+ * emulation when reached until the time fence is moved further away.
+ ****************************************************************************/
+STDMETHODIMP CController::put_TimeFence(double timeInS)
+{
+	vp_setTimeFence(timeInS);
+
+	return S_OK;
+}
+
+/****************************************************************************
  * IController.Version (read-only): gets the program version of VPM
  ****************************************************************************/
 STDMETHODIMP CController::get_Version(BSTR *pVal)
@@ -1754,6 +1756,24 @@ STDMETHODIMP CController::get_Version(BSTR *pVal)
 	return S_OK;
 }
 
+/****************************************************************************
+ * IController.Version (read-only): gets the program version of VPM as double
+ ****************************************************************************/
+ STDMETHODIMP CController::get_PMBuildVersion(double *pVal)
+ {
+	 if ( !pVal )
+		 return S_FALSE;
+
+	
+	 int nVersionNo0, nVersionNo1, nVersionNo2, nVersionNo3;
+	 GetProductVersion(&nVersionNo0, &nVersionNo1, &nVersionNo2, &nVersionNo3);
+	
+	 *pVal = nVersionNo0 * 10000 + nVersionNo1 * 100 + nVersionNo2 + nVersionNo3 / 10000.0;
+	 //Should output the version number as 30600.4711 with build number as decimal
+ 
+	 return S_OK;
+ }
+ 
 /****************************************************************************
  * IController.Games (read-only): hands out a pointer to a games-objects
  ****************************************************************************/

@@ -37,10 +37,11 @@
 #include "video.h"
 #include "cpu/at91/at91.h"
 #include "sndbrd.h"
-#include "dmddevice.h"
 #include "mech.h"
 
-#ifdef LIBPINMAME
+#if defined(VPINMAME)
+extern void dmddeviceFwdConsoleData(UINT8 data);
+#elif defined(LIBPINMAME)
 extern void libpinmame_forward_console_data(void* data, int size);
 #endif
 
@@ -75,9 +76,10 @@ extern void libpinmame_forward_console_data(void* data, int size);
 #define SAM_GAME_AUXSOL8_DSTB      0x0080 // Board 520-5325-00: Driver Board 8 Transistors wired to DSTB for AC/DC Premium/LE
 #define SAM_GAME_AUXSOL6           0x0100 // Board 520-5326-01: Driver Board 6 Transistors for Metallica
 #define SAM_GAME_AUXSOL12          0x0200 // Board 520-5326-02: Driver Board 12 Transistors
-#define SAM_GAME_IJ4               0x0400 // Board 520-5289-00: directly wired LED flashers used by Indiana Jones
-#define SAM_GAME_ACDC_FLAMES       0x0800 // Board 520-5332-00: AC/DC LE special aux board for flame lights (8 LEDs)
-#define SAM_GAME_METALLICA_MAGNET  0x1000 // Board 520-6801-00: Magnet processor for Metallica LE (coffin magnet)
+#define SAM_GAME_IJ4               0x0400 // Flipper bats timing hack & Board 520-5289-00: directly wired LED flashers used by Indiana Jones
+#define SAM_GAME_CSI               0x0800 // Flipper bats timing hack
+#define SAM_GAME_ACDC_FLAMES       0x1000 // Board 520-5332-00: AC/DC LE special aux board for flame lights (8 LEDs)
+#define SAM_GAME_METALLICA_MAGNET  0x2000 // Board 520-6801-00: Magnet processor for Metallica LE (coffin magnet)
 
 #define SAM_2COL   2
 #define SAM_3COL   3
@@ -136,30 +138,31 @@ struct {
 	UINT16 value;
 	INT16 bank;
 
-	data8_t tmp_leds[SAM_LED_MAX_STRING_LENGTH]; // gather the serial data for the LEDs board
-
 	// IO Board:
-	int lampcol;
-	int lamprow;
+	UINT16 lampcol;
+	UINT8 lamprow;
 	UINT8 auxstrb;
 	UINT8 auxdata;
 
-	// IJ4 Flipper Solenoid hack
+	// IJ4 & CSI Flipper Solenoid hack
 	int flipSolHackCountL;
 	data32_t flipSolHackStateL;
 	int flipSolHackCountR;
 	data32_t flipSolHackStateR;
+	int flipSolHackCountUL;
+	data32_t flipSolHackStateUL;
 
-	// Transmit Serial:
-	data8_t prev_ch1;
-	data8_t prev_ch2;
-	int led_col;
-	int led_row;
-	int target_row;
-	int serchar_waiting;
-	UINT8 leds_per_string;
+	// WPT
+	UINT16 latchA, latchB, latchC, latchD, latchE, latchF, latchH;
+	UINT16 col;
 
-	UINT8 LED_hack_send_garbage; // bool
+	// Shrek,FG
+	UINT8 latch[4];
+
+	// WOF
+	UINT8 ledLatch[6];
+	UINT8 dmdLatch[6];
+	UINT8 dmdOutputDisabled; // bool
 
 	UINT32 fastflipaddr;
 } samlocals;
@@ -345,8 +348,12 @@ static int dedswitch_upper_r(void)
 
 #define SAM_COMINPORT CORE_COREINPORT
 
-static void sam_LED_hack(int usartno);
-static void sam_transmit_serial(int usartno, data8_t *data, int size);
+#define SAM_NB_ACDC_METALLICA           0
+#define SAM_NB_STARTREK                 1
+#define SAM_NB_MUSTANG                  2
+#define SAM_NB_TWD                      3
+static void sam_init_nodeboard(int bridge);
+static void sam_nodebus_transmit(int usartno, data8_t* data, int size);
 
 static int sam_getSol(int solNo)
 {
@@ -625,7 +632,7 @@ static MEMORY_READ32_START(sam_readmem)
 	{ 0x01100000, 0x011FFFFF, samswitch_r },				//Various Input Signals
 	{ 0x02000000, 0x020FFFFF, MRA32_RAM },					//U9 Boot Flash Eprom
 	{ 0x02100000, 0x0211FFFF, MRA32_RAM }, //nvram_r },		//U11 NVRAM (128K)
-	{ 0x02400000, 0x024000FF, samio_r },				   //I/O Related
+	{ 0x02400000, 0x024000FF, samio_r },				    //I/O Related
 	{ 0x03000000, 0x030000FF, MRA32_RAM },					//USB Related
 	{ 0x04000000, 0x047FFFFF, MRA32_RAM },					//1st 8MB of Flash ROM U44 Mapped here
 	{ 0x04800000, 0x04FFFFFF, MRA32_BANK1 },				//Banked Access to Flash ROM U44 (including 1st 8MB ALSO!)
@@ -785,13 +792,28 @@ static WRITE32_HANDLER(sambank_w)
 		{
 			case 0x02400020: // SOL_A
 				// Solenoids are written every 250us. Flippers are fully CPU controlled with a 40ms power pulse then hold with 1ms pulse every 12ms (so a PWM cycle of 48 writes during hold)
-				if (core_gameData->hw.gameSpecific1 & SAM_GAME_IJ4) {
-					// IJ4 has some emulation timing issues that will make the emulation regularly miss and delay the solenoid writes by 40 to 80ms (masked IRQ ?) leading 
-					// to flickering flippers. This is hidden for the flippers by counting the number of writes and only consider the state after the 48 writes (which means
-					// that flippers suffer from eratic latencies. Previous implementations did filter out writes and react based on write count too).
+				if (core_gameData->hw.gameSpecific1 & (SAM_GAME_IJ4 | SAM_GAME_CSI)) {
+					// FIXME IJ4 & CSI have some emulation timing issues that will make the emulation regularly miss and delay the solenoid writes by 40 to 80ms (masked IRQ ?) 
+					// leading to flickering flippers. This is hidden for the flippers by counting the number of writes and only consider the state after the 48 writes (which 
+					// means that flippers suffer from eratic latencies. Previous implementations did filter out writes and react based on write count too).
 					samlocals.flipSolHackStateL |= data;
 					samlocals.flipSolHackStateR |= data;
-					data32_t hackedData = (data & 0x3F) | (samlocals.flipSolHackStateL & 0x40) | (samlocals.flipSolHackStateR & 0x80);
+					data32_t hackedData;
+					if (core_gameData->hw.gameSpecific1 & SAM_GAME_CSI) { // CSI also have an upper flipper on solenoid #14
+						samlocals.flipSolHackStateUL |= data;
+						hackedData = (data & 0x1F) | (samlocals.flipSolHackStateUL & 0x20) | (samlocals.flipSolHackStateL & 0x40) | (samlocals.flipSolHackStateR & 0x80);
+						if (data & 0x20) { // align to pulse on
+							samlocals.flipSolHackCountUL = 0;
+						}
+						else if (samlocals.flipSolHackCountUL >= 48) {
+							samlocals.flipSolHackCountUL = 0;
+							samlocals.flipSolHackStateUL = 0;
+						}
+					}
+					else
+					{
+						hackedData = (data & 0x3F) | (samlocals.flipSolHackStateL & 0x40) | (samlocals.flipSolHackStateR & 0x80);
+					}
 					coreGlobals.pulsedSolState &= ~(0xFFu << 8);
 					coreGlobals.pulsedSolState |= hackedData << 8;
 					core_write_pwm_output_8b(CORE_MODOUT_SOL0 + 8, hackedData);
@@ -862,7 +884,7 @@ static WRITE32_HANDLER(sambank_w)
 				break;
 			case 0x02400029: // AUX_LMP
 				samlocals.lampcol = (samlocals.lampcol & 0x00FF) | (data << 8);
-				core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0, samlocals.lampcol & 0x00FF, samlocals.lamprow, 8);
+				core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0,       samlocals.lampcol       & 0x00FF, samlocals.lamprow, 8);
 				core_write_pwm_output_lamp_matrix(CORE_MODOUT_LAMP0 + 64, (samlocals.lampcol >> 8) & 0x0003, samlocals.lamprow, 2);
 				break;
 			case 0x0240002A: // LMP_DRV
@@ -894,118 +916,115 @@ static WRITE32_HANDLER(sambank_w)
 				// Board 520-5250-14: 14 Block LED (World Poker Tour)
 				if (core_gameData->hw.gameSpecific1 & SAM_GAME_WPT)
 				{
-					static UINT16 latchA, latchB, latchC, latchD, latchE, latchF, latchH, col;
 					if (samlocals.auxstrb & ~data & 0x80) // ASTB
 					{
 						// 2 Latches for active columns
-						col = ((latchH & 0x10) >> 4)  // H5 -> Col 1
-							| ((latchH & 0x02))  // H2 -> Col 2
-							| ((latchH & 0x04))  // H3 -> Col 3
-							| ((latchH & 0x08))  // H4 -> Col 4
-							| ((latchH & 0x01) << 4)  // H1 -> Col 5
-							| ((latchH & 0x80) >> 2)  // H8 -> Col 6
-							| ((latchH & 0x20) << 1)  // H6 -> Col 7
-							| ((latchH & 0x40) << 1)  // H7 -> Col 8
-							| ((latchF & 0x80) << 1)  // F7 -> Col 9
-							| ((latchE & 0x80) << 2); // E7 -> Col 10
-						col = ((core_revword(col) >> 6) & 0x03E0) | ((col >> 5) & 0x001F);
+						samlocals.col =
+							  ((samlocals.latchH & 0x10) >> 4)  // H5 -> Col 1
+							| ((samlocals.latchH & 0x02))       // H2 -> Col 2
+							| ((samlocals.latchH & 0x04))       // H3 -> Col 3
+							| ((samlocals.latchH & 0x08))       // H4 -> Col 4
+							| ((samlocals.latchH & 0x01) << 4)  // H1 -> Col 5
+							| ((samlocals.latchH & 0x80) >> 2)  // H8 -> Col 6
+							| ((samlocals.latchH & 0x20) << 1)  // H6 -> Col 7
+							| ((samlocals.latchH & 0x40) << 1)  // H7 -> Col 8
+							| ((samlocals.latchF & 0x80) << 1)  // F7 -> Col 9
+							| ((samlocals.latchE & 0x80) << 2); // E7 -> Col 10
+						samlocals.col = ((core_revword(samlocals.col) >> 6) & 0x03E0) | ((samlocals.col >> 5) & 0x001F);
 						// 7 Latches for active rows
-						UINT16 latchI = (latchH & 0x07); // Does not really exist, made using D7/Q7 of latches E/F/H from Q4/Q5/Q6 of latch H
-						latchH = (latchF & 0x7F) | ((latchI & 0x04) << 5);
-						latchF = (latchE & 0x7F) | ((latchI & 0x01) << 7);
-						latchE = (latchD & 0x7F) | ((latchI & 0x02) << 6);
-						latchD = (latchC & 0x7F);
-						latchC = (latchB & 0x7F);
-						latchB = (latchA & 0x7F);
-						latchA = samlocals.auxdata;
+						const UINT16 latchI = (samlocals.latchH & 0x07); // Does not really exist, made using D7/Q7 of latches E/F/H from Q4/Q5/Q6 of latch H
+						samlocals.latchH = (samlocals.latchF & 0x7F) | ((latchI & 0x04) << 5);
+						samlocals.latchF = (samlocals.latchE & 0x7F) | ((latchI & 0x01) << 7);
+						samlocals.latchE = (samlocals.latchD & 0x7F) | ((latchI & 0x02) << 6);
+						samlocals.latchD = (samlocals.latchC & 0x7F);
+						samlocals.latchC = (samlocals.latchB & 0x7F);
+						samlocals.latchB = (samlocals.latchA & 0x7F);
+						samlocals.latchA = samlocals.auxdata;
 					}
-					for (int row = 0; row < 10; row++) {
-						int r = ((latchA & 0x80) || (~data & 0x80)) ? 0 : (col & (1 << row));
+					for (int row = 0; row < 10; row++) { // 2 rows of 7 LED matrix, each matrix being 7 cols x 5 rows (so 10 rows, 49 cols)
+						int r = ((samlocals.latchA & 0x80) || (~data & 0x80)) ? 0 : (samlocals.col & (1 << row));
 						int c = CORE_MODOUT_LAMP0 + 10 * 8 + 49 * row;
-						core_write_pwm_output(c     , 7, r ? (core_revbyte((UINT8)latchH) >> 1) : 0);
-						core_write_pwm_output(c +  7, 7, r ? (core_revbyte((UINT8)latchF) >> 1) : 0);
-						core_write_pwm_output(c + 14, 7, r ? (core_revbyte((UINT8)latchE) >> 1) : 0);
-						core_write_pwm_output(c + 21, 7, r ? (core_revbyte((UINT8)latchD) >> 1) : 0);
-						core_write_pwm_output(c + 28, 7, r ? (core_revbyte((UINT8)latchC) >> 1) : 0);
-						core_write_pwm_output(c + 35, 7, r ? (core_revbyte((UINT8)latchB) >> 1) : 0);
-						core_write_pwm_output(c + 42, 7, r ? (core_revbyte((UINT8)latchA) >> 1) : 0);
+						core_write_pwm_output(c     , 7, r ? (core_revbyte((UINT8)samlocals.latchH) >> 1) : 0);
+						core_write_pwm_output(c +  7, 7, r ? (core_revbyte((UINT8)samlocals.latchF) >> 1) : 0);
+						core_write_pwm_output(c + 14, 7, r ? (core_revbyte((UINT8)samlocals.latchE) >> 1) : 0);
+						core_write_pwm_output(c + 21, 7, r ? (core_revbyte((UINT8)samlocals.latchD) >> 1) : 0);
+						core_write_pwm_output(c + 28, 7, r ? (core_revbyte((UINT8)samlocals.latchC) >> 1) : 0);
+						core_write_pwm_output(c + 35, 7, r ? (core_revbyte((UINT8)samlocals.latchB) >> 1) : 0);
+						core_write_pwm_output(c + 42, 7, r ? (core_revbyte((UINT8)samlocals.latchA) >> 1) : 0);
 					}
-					//printf("%8.5f s=%02x d=%02x    %02x %02x %02x %02x %02x %02x %02x   Col=%03x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, latchA, latchB, latchC, latchD, latchE, latchF, latchH, col, (latchA & 0x80) ? 1 : 0);
+					//printf("%8.5f s=%02x d=%02x    %02x %02x %02x %02x %02x %02x %02x   Col=%03x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.latchA, samlocals.latchB, samlocals.latchC, samlocals.latchD, samlocals.latchE, samlocals.latchF, samlocals.latchH, col, (samlocals.latchA & 0x80) ? 1 : 0);
 				}
 
 				// Board 520-5264-00: Family Guy & Shrek mini playfield LEDs
 				if (core_gameData->hw.gameSpecific1 & SAM_GAME_FG)
 				{
 					// The board contains 4 latches which are shifted to latch row (13 bits), col (2 bits), and output enable (1 bit)
-					static UINT8 latch[4] = { 0 };
 					if (samlocals.auxstrb & ~data & 0x80) // ASTB
 					{
-						latch[3] = latch[2];
-						latch[2] = latch[1];
-						latch[1] = latch[0];
-						latch[0] = samlocals.auxdata;
+						samlocals.latch[3] = samlocals.latch[2];
+						samlocals.latch[2] = samlocals.latch[1];
+						samlocals.latch[1] = samlocals.latch[0];
+						samlocals.latch[0] = samlocals.auxdata;
 					}
-					int col = ((latch[0] & 0x80) || (~data & 0x80)) ? 0 : latch[3]; // Output disable if Bit 7 on latch 0 high or ASTB strobe high
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  80, (col & 1) ? latch[2] & 0x0F : 0);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  88, (col & 1) ? latch[1] & 0x0F : 0);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  96, (col & 1) ? latch[0] & 0x1F : 0);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 104, (col & 2) ? latch[2] & 0x0F : 0);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 112, (col & 2) ? latch[1] & 0x0F : 0);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 120, (col & 2) ? latch[0] & 0x1F : 0);
-					//printf("%8.5f  write %02x %02x: %02x %02x %02x %02x  out=%d\n", timer_get_time(), data, samlocals.auxdata, latch[0] & 0x1F, latch[1] &0x0F, latch[2] & 0x0F, latch[3], col & 3);
+					int col = ((samlocals.latch[0] & 0x80) || (~data & 0x80)) ? 0 : samlocals.latch[3]; // Output disable if Bit 7 on latch 0 high or ASTB strobe high
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  80, (col & 1) ? samlocals.latch[2] & 0x0F : 0);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  88, (col & 1) ? samlocals.latch[1] & 0x0F : 0);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  96, (col & 1) ? samlocals.latch[0] & 0x1F : 0);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 104, (col & 2) ? samlocals.latch[2] & 0x0F : 0);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 112, (col & 2) ? samlocals.latch[1] & 0x0F : 0);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 120, (col & 2) ? samlocals.latch[0] & 0x1F : 0);
+					//printf("%8.5f  write %02x %02x: %02x %02x %02x %02x  out=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.latch[0] & 0x1F, samlocals.latch[1] &0x0F, samlocals.latch[2] & 0x0F, samlocals.latch[3], col & 3);
 				}
 
 				if (core_gameData->hw.gameSpecific1 & SAM_GAME_WOF)
 				{
 					// Board 520-5283-00: Wheel of Fortune Opto, LEDs and flasher
-					static UINT8 ledLatch[6] = { 0 };
 					if (~samlocals.auxstrb & data & 0x08) // inversed BSTB
 					{
-						ledLatch[2] = ledLatch[1];
-						ledLatch[1] = ledLatch[0];
-						ledLatch[0] = samlocals.auxdata;
+						samlocals.ledLatch[2] = samlocals.ledLatch[1];
+						samlocals.ledLatch[1] = samlocals.ledLatch[0];
+						samlocals.ledLatch[0] = samlocals.auxdata;
 					}
 					if (samlocals.auxstrb & ~data & 0x08) // BSTB
 					{
-						ledLatch[5] = ledLatch[4];
-						ledLatch[4] = ledLatch[3];
-						ledLatch[3] = samlocals.auxdata;
+						samlocals.ledLatch[5] = samlocals.ledLatch[4];
+						samlocals.ledLatch[4] = samlocals.ledLatch[3];
+						samlocals.ledLatch[3] = samlocals.auxdata;
 					}
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  80, ledLatch[0] & 0x80 ? 0 : ledLatch[0] & 0x7f);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  96, ledLatch[0] & 0x80 ? 0 : ledLatch[1] & 0x7f);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 112, ledLatch[0] & 0x80 ? 0 : ledLatch[2] & 0x7f);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  88, ledLatch[3] & 0x80 ? 0 : ledLatch[3] & 0x7f);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 104, ledLatch[3] & 0x80 ? 0 : ledLatch[4] & 0x7f);
-					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 120, ledLatch[3] & 0x80 ? 0 : ledLatch[5] & 0x7f);
-					//printf("%8.5f  write %02x %02x:  %02x %02x %02x  %02x %02x %02x\n", timer_get_time(), data, samlocals.auxdata, ledLatch[0], ledLatch[1], ledLatch[2], ledLatch[3], ledLatch[4], ledLatch[5]);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  80, samlocals.ledLatch[0] & 0x80 ? 0 : samlocals.ledLatch[0] & 0x7f);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  96, samlocals.ledLatch[0] & 0x80 ? 0 : samlocals.ledLatch[1] & 0x7f);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 112, samlocals.ledLatch[0] & 0x80 ? 0 : samlocals.ledLatch[2] & 0x7f);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 +  88, samlocals.ledLatch[3] & 0x80 ? 0 : samlocals.ledLatch[3] & 0x7f);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 104, samlocals.ledLatch[3] & 0x80 ? 0 : samlocals.ledLatch[4] & 0x7f);
+					core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 120, samlocals.ledLatch[3] & 0x80 ? 0 : samlocals.ledLatch[5] & 0x7f);
+					//printf("%8.5f  write %02x %02x:  %02x %02x %02x  %02x %02x %02x\n", timer_get_time(), data, samlocals.auxdata, samlocals.ledLatch[0], samlocals.ledLatch[1], samlocals.ledLatch[2], samlocals.ledLatch[3], samlocals.ledLatch[4], samlocals.ledLatch[5]);
 
 					// Board 520-5274-00: Playfield Mini-Dot Display (5X7) (Wheel of Fortune)
-					static UINT8 dmdLatch[6] = { 0 }, dmdOutputDisabled;
 					if (samlocals.auxstrb & ~data & 0x10) // CSTB
 					{
-						UINT8 wasOutputDisabled = dmdOutputDisabled;
-						dmdOutputDisabled = samlocals.auxdata & 0x80;
-						if (wasOutputDisabled && dmdOutputDisabled)
+						UINT8 wasOutputDisabled = samlocals.dmdOutputDisabled;
+						samlocals.dmdOutputDisabled = samlocals.auxdata & 0x80;
+						if (wasOutputDisabled && samlocals.dmdOutputDisabled)
 						{
-							dmdLatch[5] = dmdLatch[4];
-							dmdLatch[4] = dmdLatch[3];
-							dmdLatch[3] = dmdLatch[2];
-							dmdLatch[2] = dmdLatch[1];
-							dmdLatch[1] = dmdLatch[0];
-							dmdLatch[0] = samlocals.auxdata;
+							samlocals.dmdLatch[5] = samlocals.dmdLatch[4];
+							samlocals.dmdLatch[4] = samlocals.dmdLatch[3];
+							samlocals.dmdLatch[3] = samlocals.dmdLatch[2];
+							samlocals.dmdLatch[2] = samlocals.dmdLatch[1];
+							samlocals.dmdLatch[1] = samlocals.dmdLatch[0];
+							samlocals.dmdLatch[0] = samlocals.auxdata;
 						}
 					}
-					int col = (dmdOutputDisabled || (~data & 0x80)) ? 0 : dmdLatch[5];
+					int col = (samlocals.dmdOutputDisabled || (~data & 0x80)) ? 0 : samlocals.dmdLatch[5];
 					for (int row = 0; row < 5; row++) {
 						int r = col & (1 << row);
 						int c = CORE_MODOUT_LAMP0 + 140 + 35 * row;
-						core_write_pwm_output(c,      7, r ? (core_revbyte((UINT8)dmdLatch[4]) >> 1) : 0);
-						core_write_pwm_output(c +  7, 7, r ? (core_revbyte((UINT8)dmdLatch[3]) >> 1) : 0);
-						core_write_pwm_output(c + 14, 7, r ? (core_revbyte((UINT8)dmdLatch[2]) >> 1) : 0);
-						core_write_pwm_output(c + 21, 7, r ? (core_revbyte((UINT8)dmdLatch[1]) >> 1) : 0);
-						core_write_pwm_output(c + 28, 7, r ? (core_revbyte((UINT8)dmdLatch[0]) >> 1) : 0);
+						core_write_pwm_output(c,      7, r ? (core_revbyte(samlocals.dmdLatch[4]) >> 1) : 0);
+						core_write_pwm_output(c +  7, 7, r ? (core_revbyte(samlocals.dmdLatch[3]) >> 1) : 0);
+						core_write_pwm_output(c + 14, 7, r ? (core_revbyte(samlocals.dmdLatch[2]) >> 1) : 0);
+						core_write_pwm_output(c + 21, 7, r ? (core_revbyte(samlocals.dmdLatch[1]) >> 1) : 0);
+						core_write_pwm_output(c + 28, 7, r ? (core_revbyte(samlocals.dmdLatch[0]) >> 1) : 0);
 					}
-					//printf("%8.5f  write %02x %02x: %02x %02x %02x %02x %02x  col=%02x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, dmdLatch[0], dmdLatch[1], dmdLatch[2], dmdLatch[3], dmdLatch[4], col & 0x1F, dmdOutputDisabled ? 0 : 1);
+					//printf("%8.5f  write %02x %02x: %02x %02x %02x %02x %02x  col=%02x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.dmdLatch[0], samlocals.dmdLatch[1], samlocals.dmdLatch[2], samlocals.dmdLatch[3], samlocals.dmdLatch[4], col & 0x1F, samlocals.dmdOutputDisabled ? 0 : 1);
 				}
 
 				// Board 520-5290-00: Opto and auxiliary LED PCB (Batman The Dark Knight & CSI): 3 LEDs #86, #87, #88
@@ -1125,7 +1144,7 @@ static MEMORY_WRITE32_START(sam_writemem)
 	{ 0x01080000, 0x0109EFFF, MWA32_RAM },				   //U13 RAM - DMD Data for output
 	{ 0x0109F000, 0x010FFFFF, samxilinx_w },			   //U13 RAM - Sound Data for output
 	{ 0x01100000, 0x01FFFFFF, samdmdram_w },			   //Various Output Signals
-	{ 0x02100000, 0x0211FFFF, MWA32_RAM, &nvram },		//U11 NVRAM (128K) 0x02100000,0x0211ffff
+	{ 0x02100000, 0x0211FFFF, MWA32_RAM, &nvram },		   //U11 NVRAM (128K) 0x02100000,0x0211ffff
 	{ 0x02200000, 0x022fffff, sam_io2_w },				   //LE versions: more I/O stuff (mostly LED lamps)
 	{ 0x02400000, 0x02FFFFFF, sambank_w },				   //I/O Related
 	{ 0x03000000, 0x030000FF, MWA32_RAM },				   //USB Related
@@ -1215,8 +1234,7 @@ PORT_END
 
 static MACHINE_INIT(sam) {
 	at91_set_ram_pointers(sam_reset_ram, sam_page0_ram);
-	at91_set_transmit_serial(sam_transmit_serial);
-	at91_set_serial_receive_ready(sam_LED_hack);
+	at91_set_transmit_serial(sam_nodebus_transmit);
 #ifdef SAM_USE_JIT
 	if (options.at91jit)
 	{
@@ -1237,7 +1255,7 @@ static MACHINE_INIT(sam) {
 	coreGlobals.nSolenoids = CORE_FIRSTCUSTSOL - 1 + core_gameData->hw.custSol;
 	core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_BULB_44_18V_DC_SE);
 	// For auxiliary LEDs board (LED fading level is directly sent through serial link, no integrator needed, just use it)
-	core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, CORE_MODOUT_LAMP_MAX - 80, CORE_MODOUT_NONE);
+	core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, CORE_MODOUT_LAMP_MAX - CORE_MODOUT_LAMP0 - 80, CORE_MODOUT_NONE);
 	core_set_pwm_output_type(CORE_MODOUT_GI0, coreGlobals.nGI, CORE_MODOUT_BULB_44_5_7V_AC);
 	core_set_pwm_output_type(CORE_MODOUT_SOL0, 32, CORE_MODOUT_SOL_2_STATE); // Base 32 solenoid outputs
 	core_set_pwm_output_type(CORE_MODOUT_SOL0 + SAM_FASTFLIPSOL - 1, 1, CORE_MODOUT_NONE); // GameOn fake solenoid
@@ -1253,30 +1271,31 @@ static MACHINE_INIT(sam) {
 	const char* const gn = rootDrv->name;
 	// Missing definitions:
 	// - Simpsons Kooky Carnival
-	if (strncasecmp(gn, "acd_170h", 8) == 0) { // AC DC
+	if (strncasecmp(gn, "acd_", 4) == 0) { // AC DC
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // LED flasher
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
+		sam_init_nodeboard(SAM_NB_ACDC_METALLICA);
 	}
-	else if (strncasecmp(gn, "avs_170h", 8) == 0) { // Avengers
+	else if (strncasecmp(gn, "avs_", 4) == 0) { // Avengers
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 27 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper 3 LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "avr_120h", 8) == 0) { // Avatar
+	else if (strncasecmp(gn, "avr_", 4) == 0) { // Avatar
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 27 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper 3 LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "bbh_170", 7) == 0) { // Big Buck Hunter
+	else if (strncasecmp(gn, "bbh_", 4) == 0) { // Big Buck Hunter
 		// Did not find a complete manual anywhere (even Stern's downloads do not have the schematics/solenoids) so this is from the VPX table, completed with the backglass flasher map
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "bdk_294", 7) == 0) { // Batman The Dark Knight
+	else if (strncasecmp(gn, "bdk_", 4) == 0) { // Batman The Dark Knight
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
@@ -1289,19 +1308,19 @@ static MACHINE_INIT(sam) {
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60, 1, CORE_MODOUT_LED_STROBE_1_10MS);
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 8, CORE_MODOUT_LED); // LEDs on opto board
 	}
-	else if (strncasecmp(gn, "csi_240", 7) == 0) { // CSI
+	else if (strncasecmp(gn, "csi_", 4) == 0) { // CSI
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC); // Note that #22 is 2 #89 under playfield and 1 #161 above playfield #161 is 12V
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 31 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 8, CORE_MODOUT_LED); // LEDs on opto board
 	}
-	else if (strncasecmp(gn, "fg_1200ag", 9) == 0) { // Family Guy [TODO crash in AT91 jit]
+	else if (strncasecmp(gn, "fg_", 3) == 0) { // Family Guy [TODO crash in AT91 jit]
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 18 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 3 * 2 * 8, CORE_MODOUT_LED_STROBE_8_16MS); // Mini playfield LEDs
 	}
-	else if (strncasecmp(gn, "ij4_210", 7) == 0) { // Indiana Jones
+	else if (strncasecmp(gn, "ij4_", 4) == 0) { // Indiana Jones
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 27 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper 3 LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
@@ -1311,31 +1330,33 @@ static MACHINE_INIT(sam) {
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 55 - 1, 2, CORE_MODOUT_LED); // Swordman
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 56 - 1, 2, CORE_MODOUT_LED); // Skull
 	}
-	else if (strncasecmp(gn, "im_186ve", 8) == 0) { // Iron Man
+	else if (strncasecmp(gn, "im_", 3) == 0) { // Iron Man
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 4, CORE_MODOUT_LED); // Led Flasher (Iron Man Vault Edition)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_LED); // Led Flasher (Iron Man Vault Edition)
 	}
-	else if (strncasecmp(gn, "mtl_180h", 8) == 0) { // Metallica LE
+	else if (strncasecmp(gn, "mtl_", 4) == 0) { // Metallica LE
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + CORE_FIRSTCUSTSOL + 6 - 1, 1, CORE_MODOUT_PULSE); // Coffin board mode bit #0
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + CORE_FIRSTCUSTSOL + 7 - 1, 1, CORE_MODOUT_PULSE); // Coffin board mode bit #1
+		sam_init_nodeboard(SAM_NB_ACDC_METALLICA);
 	}
-	else if (strncasecmp(gn, "mt_145h", 7) == 0) { // Mustang LE
+	else if (strncasecmp(gn, "mt_", 3) == 0) { // Mustang LE
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
+		sam_init_nodeboard(SAM_NB_MUSTANG);
 	}
-	else if (strncasecmp(gn, "nba_802", 7) == 0) { // NBA
+	else if (strncasecmp(gn, "nba_", 4) == 0) { // NBA
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 13 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "potc_600af", 10) == 0) { // Pirates of the Caribbean
+	else if (strncasecmp(gn, "potc_", 5) == 0) { // Pirates of the Caribbean
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 27 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper 3 LEDs
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 24 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Board 520-5258-00: 'H' LED
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 32 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Board 520-5258-00: 'E' LED
@@ -1348,84 +1369,93 @@ static MACHINE_INIT(sam) {
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 22 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 30 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "rsn_110h", 8) == 0) { // Rolling Stones
+	else if (strncasecmp(gn, "rsn_", 4) == 0) { // Rolling Stones
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60 - 1, 3, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 20 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 31 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "scarn200", 8) == 0) { // Simpsons Kooky Carnival
+	else if (strncasecmp(gn, "scarn", 5) == 0) { // Simpsons Kooky Carnival
 		// TODO no manual found
 	}
-	else if (strncasecmp(gn, "shr_141", 7) == 0) { // Shrek
+	else if (strncasecmp(gn, "shr_", 4) == 0) { // Shrek
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 61 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper 2 LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 3*2*8, CORE_MODOUT_LED_STROBE_8_16MS); // Mini playfield LEDs
 	}
-	else if (strncasecmp(gn, "sman_261", 8) == 0) { // Spider-Man
+	else if (strncasecmp(gn, "sman_", 5) == 0) { // Spider-Man
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60 - 1, 3, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "smanve_101", 10) == 0) { // Spider-Man Vault Edition
+	else if (strncasecmp(gn, "smanve_", 7) == 0) { // Spider-Man Vault Edition
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "st_162h", 7) == 0) { // Star Trek LE
+	else if (strncasecmp(gn, "st_", 3) == 0) { // Star Trek LE
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 23 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
+		sam_init_nodeboard(SAM_NB_STARTREK);
 	}
-	else if (strncasecmp(gn, "tf_180h", 7) == 0) { // Transformers
+	else if (strncasecmp(gn, "tf_", 3) == 0) { // Transformers
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 58 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Megatron
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60 - 1, 3, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 31 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "trn_174h", 8) == 0) { // Tron Legacy
+	else if (strncasecmp(gn, "trn_", 4) == 0) { // Tron Legacy
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 100, 6, CORE_MODOUT_LED); // Ramp RGB LEDs
-		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60 - 1, 3, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LEDs
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_BULB_89_20V_DC_WPC);
+		if (Machine->gamedrv->name[strlen(Machine->gamedrv->name)-1] == 'h')
+			core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // Limited Edition: All LED
+		else
+			core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60 - 1, 3, CORE_MODOUT_LED_STROBE_1_10MS); // Pro: #555 except for bumper LEDs
 	}
-	else if (strncasecmp(gn, "twd_160h", 8) == 0) { // The Walking Dead LE
+	else if (strncasecmp(gn, "twd_", 4) == 0) { // The Walking Dead LE
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 31 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
+		sam_init_nodeboard(SAM_NB_TWD);
 	}
-	else if (strncasecmp(gn, "twenty4_150", 11) == 0) { // 24
+	else if (strncasecmp(gn, "twenty4_", 8) == 0) { // 24
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 26 - 1, 4, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 31 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
-	else if (strncasecmp(gn, "wof_500", 7) == 0) { // Wheel of Fortune
+	else if (strncasecmp(gn, "wof_", 4) == 0) { // Wheel of Fortune
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 60 - 1, 3, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LEDs
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 48, CORE_MODOUT_LED); // Wheel LEDs
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 140, 175, CORE_MODOUT_LED_STROBE_1_5MS); // Mini DMD (175 LEDs)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 19 - 1, 3, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 8, CORE_MODOUT_LED); // 4 LED flasher at the back of the wheel
 	}
-	else if (strncasecmp(gn, "wpt_140a", 8) == 0) { // World Poker Tour
-		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80, 490, CORE_MODOUT_LED); // Mini DMD (490 LEDs, but are they really faded ?)
+	else if (strncasecmp(gn, "wpt_", 4) == 0) { // World Poker Tour
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 62 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LED
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 70 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LED
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 78 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 22 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
-		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80 - 1, 49 * 10, CORE_MODOUT_LED_STROBE_1_10MS); // 14 Block LED (actually 2ms strobe every 20ms)
+		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80 - 1, 49 * 10, CORE_MODOUT_LED_STROBE_1_10MS); // 14 Block LED (actually 2ms strobe every 20ms, but are they really faded ?)
 	}
-	else if (strncasecmp(gn, "xmn_151h", 8) == 0) { // X-Men
+	else if (strncasecmp(gn, "xmn_", 4) == 0) { // X-Men
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED (Looks nicer with bulbs, but it really has LEDs)
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 17 - 1, 6, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC);
 	}
+	// Defaults to 2 state legacy integrator for better backward compatibility
+	if ((options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL)) == 0)
+		for (int i = 0; i < coreGlobals.nSolenoids; i++)
+			if (coreGlobals.physicOutputState[i].type != CORE_MODOUT_SOL_2_STATE)
+				core_set_pwm_output_type(CORE_MODOUT_SOL0, 1, CORE_MODOUT_LEGACY_SOL_2_STATE);
 }
 
 void sam_init(void)
@@ -1435,7 +1465,6 @@ void sam_init(void)
 	memset(&samlocals, 0, sizeof(samlocals));
 	samlocals.pass = 16;
 	samlocals.coindoor = 1;
-	samlocals.led_row = -1;
 
 	//!! timing hacks for CSI and IJ
 	if (strncasecmp(gn, "csi_", 4) == 0 || strncasecmp(gn, "ij4_", 4) == 0)
@@ -1589,169 +1618,496 @@ static SWITCH_UPDATE(sam) {
 	}
 }
 
+// -- High level emulation of nodeboards --
+// 
+//   This is built from reading main gamecode, as well as nodeboard firmware and schematics
+//
+//   The 5 first games using these boards were more or less beta version from ACDC & Metallica which have a very basic 
+//   protocol, to TWD and Mustang which implement most of it and are very similar to Spike nodeboards.
+// 
+// - ACDC LE (2012) tested with acd_170h
+// - Metallica Premium Monsters (2013) tested with mtl_180h
+//   Board 520-5331-00: Grinder Multi-Color LED driver
+//     Single board with the bridge and the single child node into the same little controller (ATtiny4313-SU), driving 4 GI outputs and
+//     some LED drivers. Does not implement the full communication protocol (see below)
+// 
+// - Star Trek LE (2013) tested with st_162h
+//   Board 520-6812-00: top board, bridge and child board 5
+//   Board 520-6811-00: bill Premium / LE Left, child board 6
+//   Board 520-6808-00: bill Premium / LE Center, child board 7
+//   Board 520-5322-00: 32 LEDs, 32 switch, child board 8
+//   Implements the communication protocol but Star Trek gamecode just sends LED state of the 4 nodeboards every 32ms
+// 
+// - Mustang LE (2014) tested with mt_145h
+//   Board 520-6822-00 Board 5: Bridge (ATtiny2313A-SU) and child (LPC1112FHN33/xxx) on the same board
+//   Gamecode runs a little startup sequence to validate bridge communication and setup nodeboards then simply send Led states
+// 
+// - The Walking Dead LE (2014) tested with twd_160h
+//   Board 520-6937-00: bridge & child Board 3 (10 onboard LEDs, 14 driven outputs)
+//   Board 520-5322-00: 32 LEDs, 32 switch, child board 8
+//   TWD gamecode runs a startup sequence with bridge setup (03/05 broadcasts), then nodeboards setup (F1/FE/FF/FB messages), 
+//   then sends LED data at a 16ms pace (no fading, 2 messages per board)
+// 
+//   The architecture is designed around the Main CPU, a very simple 'Bridge node' and several 'Child nodes'.
+//   The bridge node is often located on a board that also has a child node. Bridge is a very basic function
+//   built with an ATtiny2313A controller which makes the bridge between CPU (simple point to point communication)
+//   and child nodes (RS485 multi drop communication that support addressing messages).
+// 
+//   Child Nodeboard firmwares are partially available in main CPU ROM likely used to update the nodeboards.
+//   But when updating the nodeboard firmware, the CPU only writes to the flash ROM after the first 0x1000 bytes.
+//   These 4Kb of memory contains static information which is likely flashed in factory and never changed.
+//   Therefore values for these are guessed by reverse engineering what the CPU expects when reading. These
+//   could also be obtained from real boards, or exploiting the 0xF5 GetChecksum command but noone has done
+//   that yet.
+//
+//   The child nodeboards use LPC11xx/LPC13xx controllers, for which there has been an attempt to reverse engineer
+//   the boot loader here: https://github.com/domenpk/lpc13xx_boot_analysis/blob/master/boot_disassembly.txt
+//   This boot loader is 16kb mapped at 0x1fff0000
+//
+// Communication protocol between CPU and bridge is the following:
+//   CPU->Bridge command:
+//    . Bridge command (Bit7=0, Bit6/5=unknown, Bit0..4=command)
+//    . Payload Size (number of bytes after this one)
+//    . Payload Data
+//   CPU->Bridge to broadcast to node:
+//    . Node address (Bit7=1), Bit4..6=unknown, Bit0..3=board address)
+//    . Payload Size (number of bytes after this one)
+//    . Payload Data
+//    . Payload Data Checksum (TWD only)
+//    . Expected Response Size (TWD only)
+//   Bridge->CPU: Data then Checksum
+//    . CPU and Bridge know the length of the response so the protocol is just the corresponding data with a (negative) checksum
+// 
+// Communication between bridge and child nodeboards is not emulated here since the high level emulation is done at the bridhe node.
 
-static void sam_LED_hack(int usartno)
-{
-	const char * const gn = Machine->gamedrv->name;
+#define SAM_NB_TYPE_520_5331_00           0 // Metallica Premium Monsters, Grinder Multi-Color LED driver
+#define SAM_NB_TYPE_520_6937_10           1 // TWD with a LPC1112HN33/101 (schematics in the TWD LE manual, using firmware included in the main CPU gamecode)
+#define SAM_NB_TYPE_520_5322_10           2 // TWD, 32 LEDs, 32 switch, child board 8
+#define SAM_NB_TYPE_520_5322_20           3 // Star Trek, 32 LEDs, 32 switch, child board 8
+#define SAM_NB_TYPE_520_6808_00           4 // Star Trek, bill Premium / LE Center, child board 7
+#define SAM_NB_TYPE_520_6811_00           5 // Star Trek, bill Premium / LE Left, child board 6
+#define SAM_NB_TYPE_520_6812_00           6 // Star Trek, top board, bridge and child board 5
+#define SAM_NB_TYPE_520_6822_00           7 // Mustang with a LPC1112HN33/101 (schematics in the Mustang LE manual, using firmware included in the main CPU gamecode)
 
-	// Mustang and TWD LE do not transmit data for a really long time.  These are ROM hacks that force the issue to get things moving.
+#define SAM_NB_STATUS_RESET_POR           0x0001 // Last reset cause: reset from POR (power on reset)
+#define SAM_NB_STATUS_RESET_WDG           0x0004 // Last reset cause: watchdog (or F1 command)
+#define SAM_NB_STATUS_RESET_BOD           0x0008 // Last reset cause: reset from BOD (brown-out detect: supply voltage went below minimum causing a reset)
+#define SAM_NB_STATUS_UART_OVERRUN        0x0010 // UART overrun error
+#define SAM_NB_STATUS_UART_FRAMING_ERR    0x0020 // UART framing eroor
+#define SAM_NB_STATUS_UART_BREAK_INT      0x0040 // UART break interrupt
+#define SAM_NB_STATUS_FAULT               0x0080 // Fault on board output (/FAULT signal)
+#define SAM_NB_STATUS_MSG_LENGTH_OVERFLOW 0x0100 // Message length overflow (message is too long)
+#define SAM_NB_STATUS_MSG_COUNT_OVERFLOW  0x0400 // Message count overflow (there are too many messages pending)
+#define SAM_NB_STATUS_ISENSE              0x1000 // ISense signal (ADC comparator)
+#define SAM_NB_STATUS_MSG_CHECKSUM_ERROR  0x2000 // Message received with invalid checksum
+#define SAM_NB_STATUS_UNK1                0x4000 // 
+#define SAM_NB_STATUS_UNK2                0x8000 // 
 
-	if (strncasecmp(gn, "mt_145hb", 8)==0)
-	{
-		cpu_writemem32ledw(0x01061648, 0x00);
-	}
-	else if (strncasecmp(gn, "mt_145h", 7)==0)
-	{
-		cpu_writemem32ledw(0x01061728, 0x00);
-	}
-	else if (strncasecmp(gn, "mt_145", 6)==0)
-	{
-		cpu_writemem32ledw_dword(0x1eb0, 0xe1a00000);
-	}
-	else // The default implementation is to blast some data at it.  This seems to work for Walking Dead LE, but not Mustang.
-	{
-		samlocals.LED_hack_send_garbage = 1;
-	}
+#define LOG_NODEBOARD 0
 
-	at91_set_serial_receive_ready(NULL); // disable hack after triggering it once in here
+typedef struct sam_nodeboard {
+	UINT8        address;
+	int          type;
+	UINT32       lpcPartId;     // LPC11xx part ID see LPC11 manual section 26.5.11 Part Identification number for a comprehensive list
+	UINT32       status;
+	UINT32       nMsgReceived;
+	int          ledCount;
+	int          ledMap[64];
+} sam_nodeboard_t;
+
+struct {
+	// Nodebus setup
+	int             bridge;
+	int             bridgeVersionId;
+	sam_nodeboard_t nodeboards[16];
+	// Buffer for message sent by the main CPU board
+	int             rcvMsgPos;
+	UINT8           rcvChecksum;
+	UINT8           rcvMsg[256];
+	// Buffer for messages sent from nodeboards
+	int             sendMsgPos;
+	UINT8           sendChecksum;
+	UINT8           sendMsg[1024];
+} nblocals;
+
+static void sam_set_nodeboard(UINT8 address, int type);
+
+static void sam_init_nodeboard(int bridge) {
+	memset(&nblocals, 0, sizeof(nblocals));
+	nblocals.bridge = bridge;
+	switch (bridge)
+	{
+	case SAM_NB_ACDC_METALLICA:
+		// Not really a nodeboard since it uses a dedicated, non addressed (single board) communication protocol
+		sam_set_nodeboard(0, SAM_NB_TYPE_520_5331_00);
+		// The 48 Leds used to be mapped to 81..128, and the 4 GI strings to 130, 132, 134, 136
+		for (int i = 0; i < 48; i++)
+			nblocals.nodeboards[0].ledMap[i] = CORE_MODOUT_LAMP0 + 80 + i;
+		break;
+	case SAM_NB_STARTREK:
+		sam_set_nodeboard(5, SAM_NB_TYPE_520_6812_00);
+		sam_set_nodeboard(6, SAM_NB_TYPE_520_6811_00);
+		sam_set_nodeboard(7, SAM_NB_TYPE_520_6808_00);
+		sam_set_nodeboard(8, SAM_NB_TYPE_520_5322_20);
+		// Led mapping for backward compatibility
+		for (int i = 0; i < 64; i++) {
+			nblocals.nodeboards[5].ledMap[i] = CORE_MODOUT_LAMP0 + 80       + i;
+			nblocals.nodeboards[6].ledMap[i] = CORE_MODOUT_LAMP0 + 80 +  65 + i;
+			nblocals.nodeboards[7].ledMap[i] = CORE_MODOUT_LAMP0 + 80 + 130 + i;
+			nblocals.nodeboards[8].ledMap[i] = CORE_MODOUT_LAMP0 + 80 + 195 + i;
+		}
+		break;
+	case SAM_NB_MUSTANG:
+		nblocals.bridgeVersionId = 0x000805;
+		sam_set_nodeboard(5, SAM_NB_TYPE_520_6822_00);
+		for (int i = 0; i < 64; i++)
+			nblocals.nodeboards[5].ledMap[i] = CORE_MODOUT_LAMP0 + 80 + i;
+		break;
+	case SAM_NB_TWD:
+		nblocals.bridgeVersionId = 0x000d05;
+		// Board #3 drives directly 18 onboard Leds as well as 14 outputs, and additional Leds through chained serial boards 3A, 3B, 3C
+		// Board #8 drives directly 32 outputs, and additional Leds through chained serial boards 8A, 8B, 8C, 8D
+		// Chained serial Led boards are:
+		// - 520-6827-00A (6 onboard Leds, 2 outputs) for board 3A, 3C, 8A, 8B, 8C
+		// - 520-6829-00A (6 onboard Leds, 2 outputs) for board 3B
+		// - 520-6830-00A (7 onboard Leds, 1 outputs) for board 8D
+		sam_set_nodeboard(3, SAM_NB_TYPE_520_6937_10);
+		sam_set_nodeboard(8, SAM_NB_TYPE_520_5322_10);
+		// Backward compatible light number mapping:
+		for (int i = 0; i < 32; i++) {
+			nblocals.nodeboards[3].ledMap[i     ] = CORE_MODOUT_LAMP0 +  81 + i;
+			nblocals.nodeboards[8].ledMap[i     ] = CORE_MODOUT_LAMP0 + 116 + i;
+			nblocals.nodeboards[3].ledMap[i + 32] = CORE_MODOUT_LAMP0 + 151 + i;
+			nblocals.nodeboards[8].ledMap[i + 32] = CORE_MODOUT_LAMP0 + 186 + i;
+		}
+		break;
+	}
 }
 
-// The serial LED boards seem to receive a 3 byte header (85 + address, 41, 80),
-// then a 65 byte long array of bytes that represent the LEDs.
-// Walking Dead LE seems to use a different format, two strings (83, 88 but with only 0x23 leds).
+static void sam_set_nodeboard(UINT8 address, int type) {
+	nblocals.nodeboards[address].address = address;
+	nblocals.nodeboards[address].type = type;
+	nblocals.nodeboards[address].status = SAM_NB_STATUS_RESET_POR;
+	nblocals.nodeboards[address].lpcPartId = 0x042D502B; // LPC1112FHN33/101, part id can be either 0x042D502B or 0x2524D02B
+	//nblocals.nodeboards[address].lpcPartId = 0x2524D02B; // LPC1112FHN33/101, part id can be either 0x042D502B or 0x2524D02B
+	if (type == SAM_NB_TYPE_520_5331_00)
+		nblocals.nodeboards[address].ledCount = 48; // Metallica
+	else
+		nblocals.nodeboards[address].ledCount = 64; // All other boards drive 64 outputs (including serial childs)
+	for (int i = 0; i < 64; i++)
+		nblocals.nodeboards[address].ledMap[i] = i;
+}
 
-static void sam_transmit_serial(int usartno, data8_t *data, int size)
-{
-#if 0//def _DEBUG
-	int i;
-	for (i = 0; i < size; i++)
-	{
-		char s[16];
-		sprintf(s, "%02x", data[i]);
-		OutputDebugString(s);
+static void sam_nodebus_send_byte(UINT8 data) {
+	nblocals.sendMsg[nblocals.sendMsgPos] = data;
+	nblocals.sendMsgPos++;
+	nblocals.sendChecksum = nblocals.sendChecksum - data;
+}
+
+static void sam_nodebus_send_word(UINT16 data) {
+	sam_nodebus_send_byte(data & 0xFF);
+	sam_nodebus_send_byte((data >> 8) & 0xFF);
+}
+
+static void sam_nodebus_send_dword(UINT32 data) {
+	sam_nodebus_send_byte( data        & 0xFF);
+	sam_nodebus_send_byte((data >>  8) & 0xFF);
+	sam_nodebus_send_byte((data >> 16) & 0xFF);
+	sam_nodebus_send_byte((data >> 24) & 0xFF);
+}
+
+static void sam_nodebus_send_flush(sam_nodeboard_t* nodeboard, int reqResponseSize) {
+	#if LOG_NODEBOARD
+		printf("%6.3f   ", timer_get_time());
+		for (int i = 0; i < nblocals.sendMsgPos; i++)
+			printf("%02x ", nblocals.sendMsg[i]);
+	#endif
+
+	// Response checksum
+	// TWD only ? also for other nodeboards ?
+	if ((nblocals.bridge == SAM_NB_TWD) && nodeboard) {
+		nblocals.sendMsg[nblocals.sendMsgPos] = nblocals.sendChecksum;
+		nblocals.sendMsgPos++;
+		#if LOG_NODEBOARD
+			printf("[Chk = %02x] ", nblocals.sendMsg[nblocals.sendMsgPos - 1]);
+		#endif
 	}
-	OutputDebugString("\n");
-#endif
 
-	while (size > 0)
+	// Status of response (added by bridge)
+	// ....XX.. => error flags (set by bridge, unknown reasons yet: invalid response length? com error with child ?...)
+	// 1....... => flag that the byte contains a valid bridge status (to be reused instead of sending a GetBridgeStatus request)
+	// .???..?? => unknown status flags
+	if (nodeboard)
 	{
-		if (usartno == 1) {
-#ifdef VPINMAME
-			//console messages
-			while(size--)
-				FwdConsoleData((*(data++)));
-#endif
-#ifdef LIBPINMAME
-			libpinmame_forward_console_data(data, size);
-#endif
-			return;
-		}
+		nblocals.sendMsg[nblocals.sendMsgPos] = 0x80;
+		nblocals.sendMsgPos++;
+		#if LOG_NODEBOARD
+			printf("[Status = %02x] ", nblocals.sendMsg[nblocals.sendMsgPos-1]);
+		#endif
+	}
 
-		// Walking Dead LE is waiting for some sort of non-zero response
-		// from the led string.  Continue sending a block of garbage in response until we see
-		// a valid LED string.   Mustang has the same issue, but we have a hack in place that skips the check.
-		if (samlocals.LED_hack_send_garbage)
-		{
-			data8_t tmp[0x40];
-			memset(tmp, 0x01, sizeof(tmp));
-			at91_receive_serial(0, tmp, sizeof(tmp));
-		}
+	// TWD bridge only forward valid response, or set an error flags in the status byte
+	assert((reqResponseSize == -1) || (reqResponseSize = nblocals.sendMsgPos));
 
-		if (samlocals.led_row == -1)
-		{
-			// Looking for the header.
+	#if LOG_NODEBOARD
+		printf("\n");
+	#endif
 
-			// All Mustangs and Star Trek LE
-			if ((*data) == 0x80 && samlocals.prev_ch1 == 0x41)
-			{
-				if (samlocals.serchar_waiting == 2)
-				{
-					for (int i = 0; i < samlocals.leds_per_string; i++)
-						coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 80 + samlocals.target_row * samlocals.leds_per_string + i].value = samlocals.tmp_leds[i] / 255.f;
-				}
-				samlocals.leds_per_string = samlocals.prev_ch1;
-				samlocals.led_row = samlocals.prev_ch2 - 0x85;
-				if (samlocals.led_row > SAM_LEDS_MAX_STRINGS)
-					samlocals.led_row = -1;
-			}
-			// Walking Dead LE
-			if (((*data) == 0x80 || (*data) == 0xa0) && samlocals.prev_ch1 == 0x23 && (samlocals.prev_ch2 == 0x83 || samlocals.prev_ch2 == 0x88))
-			{
-				// TWD sends garbage data in the led string sometimes.   Only accept if it was framed properly. 
-				if (samlocals.serchar_waiting == 2)
-				{
-					samlocals.LED_hack_send_garbage = 0;
-					for (int i = 0; i < samlocals.leds_per_string; i++)
-						coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 80 + samlocals.target_row * samlocals.leds_per_string + i].value = samlocals.tmp_leds[i] / 255.f;
-				}
-				samlocals.leds_per_string = samlocals.prev_ch1;
-				samlocals.led_row = (samlocals.prev_ch2 == 0x83) ? ((*data) == 0x80) ? 0 : 2 : ((*data) == 0x80) ? 1 : 3;
-			}	
-			// AC/DC LE and Metallica LE
-			if ((*data) == 0x00 && samlocals.prev_ch1 == 0x80 && strncasecmp(Machine->gamedrv->name, "twd_", 4) != 0) // to prevent TWD from entering here initially
-			{
-				if (samlocals.serchar_waiting == 1)
-				{
-					for (int i = 0; i < samlocals.leds_per_string; i++)
-						coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 80 + samlocals.target_row * samlocals.leds_per_string + i].value = samlocals.tmp_leds[i] / 255.f;
-				}
-				samlocals.leds_per_string = 56;
-				samlocals.led_row = 0;
-			}
-			samlocals.led_col = 0;
-			samlocals.serchar_waiting++;
-			samlocals.prev_ch2 = samlocals.prev_ch1;
-			samlocals.prev_ch1 = *(data++);
-			size--;
-		}
-		else
+	int remaining = at91_receive_serial(0, nblocals.sendMsg, nblocals.sendMsgPos);
+	#if LOG_NODEBOARD
+		if (remaining)
+			printf("Transmit failed: %d remaining bytes\n", remaining);
+	#endif
+	nblocals.sendMsgPos = 0;
+	nblocals.sendChecksum = 0;
+}
+
+static void sam_nodebus_msg_received()
+{
+	int msgLength;
+	if (nblocals.bridge == SAM_NB_ACDC_METALLICA)
+		// Metallica has a very simple protocol: either one of the GI output address+state, or the 48 LED string + command + values
+		msgLength = (nblocals.rcvMsg[0] == 0x80) ? (2 + 48) : 2;
+	else
+		// Size = Cmd + Payload Size + Payload. Broadcasted messages have an additional expected response length byte which is not included in the payload length
+		msgLength = ((nblocals.rcvMsg[0] & 0x80) != 0) ? (2 + nblocals.rcvMsg[1] + 1) : (2 + nblocals.rcvMsg[1]);
+	
+	// Bridge command
+	if ((nblocals.rcvMsg[0] & 0x80) == 0) {
+		#if LOG_NODEBOARD
+			printf("%6.3f > ", timer_get_time());
+			for (int i = 0; i < msgLength; i++)
+				printf("%02x ", nblocals.rcvMsg[i]);
+			printf("[Bridge Cmd]\n");
+		#endif
+		switch (nblocals.rcvMsg[0])
 		{
-			const int count = size > (samlocals.leds_per_string - samlocals.led_col) ? samlocals.leds_per_string - samlocals.led_col : size;
-			int i;
-			for(i=0;i<count;i++)
+		case 0x03: // GetBridgeVersion
+			sam_nodebus_send_byte((nblocals.bridgeVersionId >> 16) & 0xFF);
+			sam_nodebus_send_byte((nblocals.bridgeVersionId >>  8) & 0xFF);
+			sam_nodebus_send_byte( nblocals.bridgeVersionId        & 0xFF);
+			sam_nodebus_send_flush(NULL, -1);
+			break;
+		case 0x05: // GetBridgeStatus
+			sam_nodebus_send_byte(0x80); //
+			sam_nodebus_send_flush(NULL, -1);
+			break;
+		}
+	}
+	// Nodeboard addressed command
+	// These commands are still processed by the bridge that will broadcast them using RS485 multi drop
+	// addressing mode, and will buffer the response until the requested size is reached.
+	else
+	{
+		#if LOG_NODEBOARD
+			printf("%6.3f > ", timer_get_time());
+			for (int i = 0; i < msgLength - 1; i++)
+				if ((nblocals.bridge == SAM_NB_TWD) && (i == msgLength - 2))
+					printf("[Chk = %02x] ", nblocals.rcvMsg[i]);
+				else
+					printf("%02x ", nblocals.rcvMsg[i]);
+			if (nblocals.bridge == SAM_NB_ACDC_METALLICA)
+				printf("%02x ", nblocals.rcvMsg[msgLength - 1]);
+			else
+				printf("[Response Length = %d]", nblocals.rcvMsg[msgLength - 1]);
+			printf("\n");
+		#endif
+
+		if (nblocals.bridge == SAM_NB_ACDC_METALLICA) {
+			UINT8 cmd = nblocals.rcvMsg[0];
+			switch (cmd & 0xF0)
 			{
-				samlocals.tmp_leds[samlocals.led_col++] = *(data++);
+			case 0x80:
+				// 48 outputs driving 16 RGB Leds. Intensity is expressed as 0..100 (so 101 levels)
+				// nblocals.rcvMsg[1] is likely a fade command but I have only witnessed 0x00 there
+				for (int i = 0; i < 48; i++)
+					coreGlobals.physicOutputState[nblocals.nodeboards[0].ledMap[i]].value = nblocals.rcvMsg[2 + i] / 100.f;
+				break;
+			case 0x90:
+				// GI Outputs, for backward compatibility we map them to lamps 130/132/134/136, intensity goes from 0..50 (51 levels)
+				coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 129 + ((cmd & 0x0F) * 2)].value = nblocals.rcvMsg[1] / 50.f;
+				break;
 			}
-			size -= count;
-			if (samlocals.led_col >= samlocals.leds_per_string)
-			{
-				samlocals.prev_ch1 = 0;
-				samlocals.target_row = samlocals.led_row;
-				samlocals.led_row = -1;
-				samlocals.serchar_waiting = 0;
+		}
+		else {
+			UINT8 address = nblocals.rcvMsg[0] & 0x7F;
+			if (address > 15) {
+				assert(FALSE); // Invalid address (should be 4 bits only)
+				return;
+			}
+
+			sam_nodeboard_t* nodeboard = &nblocals.nodeboards[address];
+			if (nodeboard->address != address) {
+				assert(FALSE); // missing nodeboard
+				return;
+			}
+			nodeboard->nMsgReceived++;
+
+			int reqResponseSize = nblocals.rcvMsg[msgLength - 1];
+
+			UINT8 payload = nblocals.rcvMsg[1];
+			if (payload == 0) {
+				assert(FALSE); // No payload => invalid as we do not have any information beside the nodeboard address
+				return;
+			}
+
+			if ((nblocals.bridge == SAM_NB_TWD) && (nblocals.rcvChecksum != nblocals.rcvMsg[msgLength - 1])) { // Requested response length is not part of the checksum
+				assert(FALSE); // Invalid checksum
+				return;
+			}
+
+			UINT8 cmd = nblocals.rcvMsg[2];
+			if ((cmd & 0xC0) == 0x80) {
+				// 0x80/0x90/0xA0/0xB0: Set/Fade LED command
+				int startLedIndex = cmd & 0x3F;
+				if ((nblocals.bridge == SAM_NB_STARTREK) || (nblocals.bridge == SAM_NB_MUSTANG) ) {
+					int ledCount = payload - 1;
+					for (int i = 0; i < ledCount; i++)
+						coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = nblocals.rcvMsg[3 + i] / 255.f;
+				}
+				else {
+					int ledCount = payload - 3;
+					// TODO implement fadeMode to get smoother light shading (320Hz fading & PWM, instead of update at communication rate which seems to vary from 30 to 60Hz)
+					UINT8 fadeMode = nblocals.rcvMsg[3];
+					if (fadeMode == 0xFF) { // Per Led fade mode
+						ledCount /= 2;
+						assert((ledCount * 2) == (payload - 3));
+						for (int i = 0; i < ledCount; i++)
+							// nblocals.rcvMsg[4 + i * 2 + 0] is the fade mode per Led (not implemented)
+							coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = nblocals.rcvMsg[4 + i * 2 + 1] / 255.f;
+					}
+					else { // Global fade mode
+						for (int i = 0; i < ledCount; i++)
+							coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = nblocals.rcvMsg[4 + i] / 255.f;
+					}
+				}
+			}
+			else {
+				switch (cmd) {
+				case 0x20: // SSPWriteAndTriggerRead: write provided output to external ouput serial port and trigger a serial port read
+					break;
+				case 0x21: // SSPRead: return the last data read after a SSPWriteAndTriggerRead
+					break;
+				case 0xF0: // ??
+					break;
+				case 0xF1: // Reset nodeboard
+					nodeboard->nMsgReceived = 0;
+					nodeboard->status = SAM_NB_STATUS_RESET_WDG;
+					for (int i = 0; i < nodeboard->ledCount; i++)
+						coreGlobals.physicOutputState[nodeboard->ledMap[i]].value = 0.f;
+					break;
+				case 0xF2: // ??
+					sam_nodebus_send_byte(4);
+					sam_nodebus_send_flush(nodeboard, reqResponseSize);
+					break;
+				case 0xF3: // ??
+					break;
+				case 0xF4: // Unimplemented in firmware
+					break;
+				case 0xF5: // GetChecksum
+					// Unimplemented, performs a checksum of a requested area of the flash RAM
+					break;
+				case 0xF6: // Unimplemented in firmware
+				case 0xF7:
+				case 0xF9:
+					break;
+				case 0xF8: // GetBootStatus (seems unimplemented in TWD firmware but part of the boot sequence, handled by bridge ? not the right firmware ?)
+					sam_nodebus_send_dword(0x00000001);
+					sam_nodebus_send_flush(nodeboard, reqResponseSize);
+					break;
+				case 0xFA:
+					break;
+				case 0xFB: // Disable OC
+					break;
+				case 0xFC: // GetBoardID
+					break;
+				case 0xFD: // GetVersion
+					break;
+				case 0xFE: // GetBoardInfo
+					//sam_nodebus_send_byte(nodeboard->address | 0x80);
+					sam_nodebus_send_byte(nodeboard->address);
+					sam_nodebus_send_byte((nblocals.bridgeVersionId >> 16) & 0xFF);
+					sam_nodebus_send_byte((nblocals.bridgeVersionId >>  8) & 0xFF);
+					sam_nodebus_send_byte( nblocals.bridgeVersionId        & 0xFF);
+					sam_nodebus_send_dword(nodeboard->lpcPartId);
+					sam_nodebus_send_byte(0x00); // Boot code version major (here from TWD 160h)
+					sam_nodebus_send_byte(0x05); // Boot code version minor (here from TWD 160h)
+					sam_nodebus_send_flush(nodeboard, reqResponseSize);
+					break;
+				case 0xFF: // GetAndResetStatus
+					if (nodeboard->type == SAM_NB_TYPE_520_5322_10) {
+						sam_nodebus_send_dword(nodeboard->nMsgReceived); // Increased before response
+						sam_nodebus_send_dword(nodeboard->status);
+					}
+					else if (nodeboard->type == SAM_NB_TYPE_520_6822_00) {
+						sam_nodebus_send_dword(nodeboard->nMsgReceived-1); // Increased after response
+						sam_nodebus_send_word(nodeboard->status);
+					}
+					sam_nodebus_send_flush(nodeboard, reqResponseSize);
+					nodeboard->status = 0;
+					break;
+				}
 			}
 		}
 	}
 }
 
+static void sam_nodebus_transmit(int usartno, data8_t *data, int size)
+{
+	// Nodebus messages
+	if (usartno == 0) {
+		for (; size > 0; size--, data++) {
+			UINT8 rcvByte = *data;
+			nblocals.rcvChecksum += rcvByte;
+			nblocals.rcvMsg[nblocals.rcvMsgPos] = rcvByte;
+			int msgLength;
+			if (nblocals.bridge == SAM_NB_ACDC_METALLICA)
+				// Metallica has a very simple protocol: either one of the GI outputs (address + state), or the 48 LED string (address + command + states)
+				msgLength = (nblocals.rcvMsg[0] == 0x80) ? (2 + 48) : 2;
+			else
+				// Broadcasted messages have an additional expected response length byte which is not included in the payload length
+				msgLength = ((nblocals.rcvMsg[0] & 0x80) != 0) ? (2 + nblocals.rcvMsg[1] + 1) : (2 + nblocals.rcvMsg[1]);
+			if (nblocals.rcvMsgPos == msgLength - 1) {
+				sam_nodebus_msg_received();
+				nblocals.rcvMsgPos = 0;
+				nblocals.rcvChecksum = 0;
+			}
+			else {
+				nblocals.rcvMsgPos++;
+				if (nblocals.rcvMsgPos >= 256) {
+					// Bug: we overflowed the reception buffer. We are likely out of sync and did not detect the start/end of a message.
+					nblocals.rcvMsgPos = 0;
+					nblocals.rcvChecksum = 0;
+				}
+			}
+		}
+	}
+	// Console messages
+	else if (usartno == 1) {
+#if defined(VPINMAME)
+		while(size--)
+			dmddeviceFwdConsoleData(*(data++));
+#elif defined(LIBPINMAME)
+		libpinmame_forward_console_data(data, size);
+#endif
+	}
+}
 
-/********************/
-/*  VBLANK Section  */
-/********************/
-static INTERRUPT_GEN(sam_vblank) {
+
+/******************************/
+/*  Interface update Section  */
+/******************************/
+static INTERRUPT_GEN(sam_interface_update) {
 	/*-------------------------------
 	/  copy local data to interface
 	/--------------------------------*/
 	samlocals.vblankCount++;
-
-	/*-- lamps --*/
-	memset(coreGlobals.lampMatrix, 0, sizeof(coreGlobals.lampMatrix));
-	for (int i = 0; i < 8 + core_gameData->hw.lampCol; i++)
-		for (int j = 0; j < 8; j++)
-			if (coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + i * 8 + j].value >= 0.25f)
-				coreGlobals.lampMatrix[i] |= 1 << j;
 
 	/*-- display --*/
 	if ((samlocals.vblankCount % SAM_DISPLAYSMOOTH) == 0) {
 		coreGlobals.diagnosticLed = samlocals.diagnosticLed;
 		samlocals.diagnosticLed = 0;
 	}
-
-   /*-- solenoids --*/
-   coreGlobals.solenoids = 0;
-   for (int i = 0; i < 32; i++)
-      if (coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i].value >= 0.5f)
-         coreGlobals.solenoids |= 1 << i;
 
 	/*-- GameOn for Fast Flips --*/
 	if (samlocals.fastflipaddr > 0 && cpu_readmem32ledw(samlocals.fastflipaddr) == 0x01)
@@ -1796,7 +2152,7 @@ static MACHINE_DRIVER_START(sam1)
     MDRV_CPU_ADD(AT91, SAM_CPUFREQ) // AT91R40008
     MDRV_CPU_MEMORY(sam_readmem, sam_writemem)
     MDRV_CPU_PORTS(sam_readport, sam_writeport)
-    MDRV_CPU_VBLANK_INT(sam_vblank, 1)
+    MDRV_CPU_VBLANK_INT(sam_interface_update, 1)
     MDRV_CPU_PERIODIC_INT(sam_irq, SAM_IRQFREQ)
     MDRV_CORE_INIT_RESET_STOP(sam, sam1, sam)
     MDRV_DIPS(8)
@@ -1825,19 +2181,33 @@ MACHINE_DRIVER_END
 /*  DMD Section  */
 /*****************/
 
-/*-- SAM DMD display uses 32 x 128 pixels by accessing 0x1000 bytes per page.
-     That's 8 bits for each pixel, but they are distributed into 4 brightness
-     bits (16 colors), and 4 translucency bits that perform the masking of the
-     secondary or "background" page that will "shine through" if the mask bits
-     of the foreground are set.
+/*-- 
+  SAM DMD display uses 32 x 128 pixels by accessing 0x1000 bytes per page.
+  That's 8 bits for each pixel, but they are distributed into 4 brightness
+  bits (16 colors), and 4 translucency bits that perform the masking of the
+  secondary or "background" page that will "shine through" if the mask bits
+  of the foreground are set.
+
+  SAM rasterizer renders each line 4 times with different display lengths 
+  to create shades. Each line is therefore made up of a pattern of 12 x 41.55us, 
+  with the 4 planes corresponding to combination of 1 / 2 / 4 / 5 of these 12 
+  time slots. The resulting frame rate is 1e6/(32x12x41.55) = 62.67Hz which 
+  has been validated with real hardware measure. The flicker/fusion threshold 
+  is supposed to be somewhere around 25-30Hz based on the fact that other 
+  hardwares like GTS3 and WPC have PWM pattern around these frequencies.
+  Therefore, to get the final luminance, we need to perform integration of at
+  least the last 24 frames. For the time being we only apply a LUT corresponding
+  to the 1 / 2 / 4 / 5 pattern.
 --*/
 static PINMAME_VIDEO_UPDATE(samdmd_update) {
-	//static const UINT8 hew[16] = { 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15, 15};
-
+	// This LUT suppose that each bitplane correspond to one of the frame, since the display length is 1 / 2 / 4 / 5,
+	// RAM never contains 8/9/10/11 which creates a monotonic LUT, but with a discontinuity as the hardware has 13 shades while the code uses 12.
+	static const UINT8 lumLUT[16] = { 0, 21, 43, 64, 85, 106, 128, 149, 106 /*unused*/, 128 /*unused*/, 149 /*unused*/, 170 /*unused*/, 191, 213, 234, 255};
 	int ii;
 	for( ii = 0; ii < 32; ii++ )
 	{
-		UINT8 *line = &coreGlobals.dotCol[ii+1][0];
+		UINT8 *dotRaw = &coreGlobals.dmdDotRaw[ii * layout->length];
+		UINT8 *dotLum = &coreGlobals.dmdDotLum[ii * layout->length];
 		const UINT8* const offs1 = memory_region(REGION_CPU1) + 0x1080000 + (samlocals.video_page[0] << 12) + ii * 128;
 		const UINT8* const offs2 = memory_region(REGION_CPU1) + 0x1080000 + (samlocals.video_page[1] << 12) + ii * 128;
 		int jj;
@@ -1848,60 +2218,69 @@ static PINMAME_VIDEO_UPDATE(samdmd_update) {
 			const UINT8 mix = RAM1 >> 4;
 			const UINT8 temp = (RAM2 & mix) | (RAM1 & (mix^0xF)); //!! is this correct or is mix rather a multiplier/ratio/alphavalue??
 			if ((mix != 0xF) && (mix != 0x0)) //!! happens e.g. in POTC in extra ball explosion animation: RAM1 values triggering this: 223, 190, 175, 31, 25, 19, 17 with RAM2 being always 0. But is this just wrong game data (as its a converted animation)?!
-				LOG(("Special DMD Bitmask %01X",mix));
-			*line = /*hew[*/temp/*]*/;
-			line++;
+				LOG(("Special DMD Bitmask %01X RAM1=%02x RAM2=%02x pix@(%3dx%2d)", mix, RAM1, RAM2, jj, ii));
+			*dotRaw++ = temp;
+			*dotLum++ = lumLUT[temp];
 		}
 	}
-
-	video_update_core_dmd(bitmap, cliprect, layout);
+	core_dmd_video_update(bitmap, cliprect, layout, NULL);
 	return 0;
 }
 
+#define SAT_NYB(v) (UINT8)(15.0f * (v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v))
+#define SAT_BYTE(v) (UINT8)(255.0f * (v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v))
+
+// Little 5x7 led matrix used in World Poker Tour (2 rows of 7 each)
 static PINMAME_VIDEO_UPDATE(samminidmd_update) {
-    int ii,kk;
     const int dmd_x = (layout->left-10)/7;
     const int dmd_y = (layout->top-34)/9;
-    for (int y = 0; y < 8; y++)
+    assert(layout->length == 5);
+    assert(layout->start == 7);
+    assert(0 <= dmd_x && dmd_x < 7);
+    assert(0 <= dmd_y && dmd_y < 2);
+    for (int y = 0; y < 7; y++)
 		for (int x = 0; x < 5; x++) {
 			const int target = 10 * 8 + (dmd_y * 5 + x) * 49 + (dmd_x * 7 + y);
 			const float v = coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + target].value;
-			coreGlobals.dotCol[y + 1][x] = (UINT8)(15.0f * (v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v));
+			coreGlobals.dmdDotRaw[y * 5 + x] = SAT_NYB(v); // TODO raw value should not be tied to the PWM integration
+			coreGlobals.dmdDotLum[y * 5 + x] = SAT_BYTE(v);
 		}
     // Use the video update to output mini DMD as LED segments (somewhat hacky)
-    for (ii = 0; ii < 5; ii++) {
+    for (int x = 0; x < 5; x++) {
         int bits = 0;
-        for (kk = 1; kk < 8; kk++)
-            bits = (bits<<1) | (coreGlobals.dotCol[kk][ii] ? 1 : 0);
-        coreGlobals.drawSeg[5*dmd_x + 35*dmd_y + ii] = bits;
+        for (int y = 0; y < 7; y++)
+            bits = (bits << 1) | (coreGlobals.dmdDotRaw[y * 5 + x] ? 1 : 0);
+        coreGlobals.drawSeg[35 * dmd_y + 5 * dmd_x + x] = bits;
     }
     if (!pmoptions.dmd_only)
-        video_update_core_dmd(bitmap, cliprect, layout);
+        core_dmd_video_update(bitmap, cliprect, layout, NULL);
     return 0;
 }
 
+// Wheel of Fortune Led matrix display
 static PINMAME_VIDEO_UPDATE(samminidmd2_update) {
     int ii,jj,kk;
     for (jj = 0; jj < 35; jj++)
 		for (kk = 0; kk < 5; kk++) {
 			const int target = 140 + jj + (kk * 35);
 			const float v = coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + target].value;
-			coreGlobals.dotCol[kk + 1][jj] = (UINT8)(15.0f * (v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v));
+			coreGlobals.dmdDotRaw[kk * layout->length + jj] = SAT_NYB(v); // TODO raw value should not be tied to the PWM integration
+			coreGlobals.dmdDotLum[kk * layout->length + jj] = SAT_BYTE(v);
 		}
     // Use the video update to output mini DMD as LED segments (somewhat hacky)
     for (ii = 0; ii < 35; ii++) {
       int bits = 0;
-      for (kk = 1; kk < 6; kk++)
-        bits = (bits<<1) | (coreGlobals.dotCol[kk][ii] ? 1 : 0);
+      for (kk = 0; kk < 5; kk++)
+        bits = (bits<<1) | (coreGlobals.dmdDotRaw[kk * layout->length + ii] ? 1 : 0);
       coreGlobals.drawSeg[ii] = bits;
     }
     if (!pmoptions.dmd_only)
-      video_update_core_dmd(bitmap, cliprect, layout);
+      core_dmd_video_update(bitmap, cliprect, layout, NULL);
     return 0;
 }
 
 static struct core_dispLayout sam_dmd128x32[] = {
-	{0, 0, 32, 128, CORE_DMD|CORE_DMDNOAA, (genf *)samdmd_update},
+	{0, 0, 32, 128, CORE_DMD/*| CORE_DMDNOAA*/, (genf*)samdmd_update},
 	{0}
 };
 
@@ -1992,7 +2371,7 @@ CORE_CLONEDEF(sam1_flashb, 0230, 0310, "S.A.M. System Flash Boot (V2.3)", 2007, 
 /*-------------------------------------------------------------------
 / World Poker Tour
 /-------------------------------------------------------------------*/
-INITGAME(wpt, GEN_SAM, sammini1_dmd128x32, SAM_2COL + 62, SAM_GAME_WPT) // 62 additinal columns for Mini DMD (5*7 displays * 14)
+INITGAME(wpt, GEN_SAM, sammini1_dmd128x32, SAM_2COL + 60, SAM_GAME_WPT) // 62 additinal columns for Mini DMD (5*7 displays * 14)
 
 SAM1_ROM32MB(wpt_103a, "wpt_103a.bin", CRC(cd5f80bc) SHA1(4aaab2bf6b744e1a3c3509dc9dd2416ff3320cdb), 0x019bb1dc)
 
@@ -2583,7 +2962,7 @@ CORE_CLONEDEF(bdk, 300, 294, "Batman: The Dark Knight Home Edition/Costco (V3.00
 /*-------------------------------------------------------------------
 / CSI: Crime Scene Investigation
 /-------------------------------------------------------------------*/
-INITGAME(csi, GEN_SAM, sam_dmd128x32, SAM_3COL, SAM_GAME_3LEDS_CSTB)
+INITGAME(csi, GEN_SAM, sam_dmd128x32, SAM_3COL, SAM_GAME_3LEDS_CSTB | SAM_GAME_CSI)
 
 SAM1_ROM32MB(csi_102, "csi_102a.bin", CRC(770f4ab6) SHA1(7670022926fcf5bb8f8848374cf1a6237803100a), 0x01e21fc0)
 SAM1_ROM32MB(csi_103, "csi_103a.bin", CRC(371bc874) SHA1(547588b85b4d6e79123178db3f3e51354e8d2229), 0x01E61C88)

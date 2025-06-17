@@ -36,21 +36,21 @@ PINMAME_SOUND_MODE g_fSoundMode = PINMAME_SOUND_MODE_DEFAULT;
 char g_szGameName[256] = {0}; //!! not set yet
 }
 
-int _isRunning = 0;
-int _timeToQuit = 0;
-PinmameConfig* _p_Config = nullptr;
-std::thread* _p_gameThread = nullptr;
-void* _p_userData = nullptr;
+static int _isRunning = 0;
+static int _timeToQuit = 0;
+static PinmameConfig* _p_Config = nullptr;
+static std::thread* _p_gameThread = nullptr;
+static void* _p_userData = nullptr;
 
-int _mechInit[MECH_MAXMECH];
-PinmameMechInfo _mechInfo[MECH_MAXMECH];
+static int _mechInit[MECH_MAXMECH];
+static PinmameMechInfo _mechInfo[MECH_MAXMECH];
 
-PinmameAudioInfo _audioInfo;
-float _audioData[PINMAME_ACCUMULATOR_SAMPLES * 2];
+static PinmameAudioInfo _audioInfo;
+static float _audioData[PINMAME_ACCUMULATOR_SAMPLES * 2];
 
-int _nvramInit = 0;
-uint8_t _nvram[CORE_MAXNVRAM];
-PinmameNVRAMState _nvramState[CORE_MAXNVRAM];
+static int _nvramInit = 0;
+static uint8_t _nvram[CORE_MAXNVRAM];
+static PinmameNVRAMState _nvramState[CORE_MAXNVRAM];
 
 typedef struct {
 	PinmameDisplayLayout layout;
@@ -58,7 +58,7 @@ typedef struct {
 	int size;
 } PinmameDisplay;
 
-std::vector<PinmameDisplay*> _displays;
+static std::vector<PinmameDisplay*> _displays;
 
 static const PinmameKeyboardInfo _keyboardInfo[] = {
 	{ "A", PINMAME_KEYCODE_A, KEYCODE_A },
@@ -235,8 +235,8 @@ int GetDisplayCount()
 
 	GetDisplayCount(core_gameData->lcdLayout, &index, &hasDMDOrVideo);
 
-    if (!hasDMDOrVideo)
-        index += 1;
+	if (!hasDMDOrVideo)
+		index += 1;
 
 	return index;
 }
@@ -455,9 +455,7 @@ extern "C" void libpinmame_update_display(const int index, const struct core_dis
 			if (p_layout->type & CORE_DMDSEG)
 				pDisplay->layout.depth = 2;
 			else {
-				const int shade_16_enabled = ((core_gameData->gen & (GEN_SAM|GEN_SPA|GEN_ALVG_DMD2))
-					|| (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0)
-					|| (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0));
+				const int shade_16_enabled = (core_gameData->gen & (GEN_SAM|GEN_SPA|GEN_ALVG|GEN_ALVG_DMD2|GEN_GTS3)) != 0;
 				pDisplay->layout.depth = shade_16_enabled ? 4 : 2;
 			}
 
@@ -1051,6 +1049,15 @@ PINMAMEAPI void PinmameSetModOutputType(const int output, const int no, const PI
 }
 
 /******************************************************
+ * PinmameSetTimeFence
+ ******************************************************/
+
+PINMAMEAPI void PinmameSetTimeFence(const double timeInS)
+{
+	vp_setTimeFence(timeInS);
+}
+
+/******************************************************
  * PinmameGetMaxSolenoids
  ******************************************************/
 
@@ -1068,7 +1075,8 @@ PINMAMEAPI int PinmameGetSolenoid(const int solNo)
 	if (!_isRunning)
 		return 0;
 
-	core_request_pwm_output_update();
+	if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL))
+		core_update_pwm_outputs(CORE_MODOUT_SOL0 + solNo - 1, 1);
 
 	return vp_getSolenoid(solNo);
 }
@@ -1082,7 +1090,7 @@ PINMAMEAPI int PinmameGetChangedSolenoids(PinmameSolenoidState* const p_changedS
 	if (!_isRunning)
 		return -1;
 
-	core_request_pwm_output_update();
+	core_update_pwm_solenoids();
 
 	vp_tChgSols chgSols;
 	const int count = vp_getChangedSolenoids(chgSols);
@@ -1109,7 +1117,8 @@ PINMAMEAPI int PinmameGetLamp(const int lampNo)
 	if (!_isRunning)
 		return 0;
 
-	core_request_pwm_output_update();
+	if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_LAMPS))
+		core_update_pwm_outputs(CORE_MODOUT_LAMP0 + lampNo - 1, 1);
 
 	return vp_getLamp(lampNo);
 }
@@ -1123,7 +1132,7 @@ PINMAMEAPI int PinmameGetChangedLamps(PinmameLampState* const p_changedStates)
 	if (!_isRunning)
 		return -1;
 
-	core_request_pwm_output_update();
+	core_update_pwm_lamps();
 
 	vp_tChgLamps chgLamps;
 	const int count = vp_getChangedLamps(chgLamps);
@@ -1150,7 +1159,8 @@ PINMAMEAPI int PinmameGetGI(const int giNo)
 	if (!_isRunning)
 		return 0;
 
-	core_request_pwm_output_update();
+	if (options.usemodsol & (CORE_MODOUT_FORCE_ON | CORE_MODOUT_ENABLE_PHYSOUT_GI))
+		core_update_pwm_outputs(CORE_MODOUT_GI0 + giNo - 1, 1);
 
 	return vp_getGI(giNo);
 }
@@ -1164,7 +1174,7 @@ PINMAMEAPI int PinmameGetChangedGIs(PinmameGIState* const p_changedStates)
 	if (!_isRunning)
 		return -1;
 
-	core_request_pwm_output_update();
+	core_update_pwm_gis();
 
 	vp_tChgGIs chgGIs;
 	const int count = vp_getChangedGI(chgGIs);
@@ -1191,7 +1201,7 @@ PINMAMEAPI int PinmameGetChangedLEDs(const uint64_t mask, const uint64_t mask2, 
 	if (!_isRunning)
 		return -1;
 
-	core_request_pwm_output_update();
+	core_update_pwm_segments();
 
 	vp_tChgLED chgLEDs;
 	const int count = vp_getChangedLEDs(chgLEDs, mask, mask2);

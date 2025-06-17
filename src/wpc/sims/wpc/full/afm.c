@@ -425,7 +425,7 @@ static core_tGameData afmGameData = {
   GEN_WPC95, wpc_dispDMD,
   {
     FLIP_SW(FLIP_L | FLIP_U) | FLIP_SOL(FLIP_L),
-    0,2,3,0,0,1,0, // 2 extra lamp columns for the LEDs
+    0,2,3,0,0,0,0, // 2 extra lamp columns for the LEDs
     afm_getSol, afm_handleMech, afm_getMech, afm_drawMech,
     NULL
 #ifdef ENABLE_MECHANICAL_SAMPLES
@@ -459,7 +459,7 @@ static WRITE_HANDLER(afm_wpc_w) {
       if (GET_BIT5) {
         lamps |= 1;
       }
-      core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 8 * 8, lamps);
+      core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 8 * 8, lamps & 0xff);
       core_write_pwm_output_8b(CORE_MODOUT_LAMP0 + 9 * 8, lamps >> 8);
     }
   }

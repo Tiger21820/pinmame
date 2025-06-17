@@ -2,7 +2,21 @@
 #include <cstdarg>
 #include <ctype.h>
 #include <ctime>
-#include "windows.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#if _MSC_VER >= 1800
+ // Windows 2000 _WIN32_WINNT_WIN2K
+ #define _WIN32_WINNT 0x0500
+#elif _MSC_VER < 1600
+ #define _WIN32_WINNT 0x0400
+#else
+ #define _WIN32_WINNT 0x0403
+#endif
+#define WINVER _WIN32_WINNT
+#endif
+#include <windows.h>
 #include "VPinMAMEConfig.h"
 #include "ControllerRegkeys.h"
 
@@ -271,7 +285,7 @@ extern UINT8		blit_swapxy;
 void vpm_game_init(int game_index) {
 	logfile = config_get_logfile();
 
-    /* first start with the game's built in orientation */
+	/* first start with the game's built in orientation */
 	int orientation = drivers[game_index]->flags & ORIENTATION_MASK;
 	options.ui_orientation = orientation;
 
@@ -379,10 +393,10 @@ void CLIB_DECL logerror(const char *text,...) {
     vsnprintf(szBuffer, sizeof(szBuffer) / sizeof(szBuffer[0]), text, arg);
     OutputDebugString(szBuffer);
     fprintf(logfile, szBuffer);
-	
-	//DAR@20230518 Delay in output was hiding cause of crash, should flush
-	//             the buffer regularly to ensure capture
-	fflush(logfile);
+
+    //DAR@20230518 Delay in output was hiding cause of crash, should flush
+    //             the buffer regularly to ensure capture
+    fflush(logfile);
   }
   va_end(arg);
 }
@@ -527,10 +541,10 @@ bool RegSaveOpts(HKEY hKey, rc_option *pOpt, void* pValue)
 	case rc_string:
 		pszValue = *(char**) pValue;
 		if ( pszValue )
-			fFailed = (RegSetValueEx(hKey, pOpt->name, 0, REG_SZ, (LPBYTE) pszValue, strlen(pszValue)+1)!=ERROR_SUCCESS);
+			fFailed = (RegSetValueEx(hKey, pOpt->name, 0, REG_SZ, (LPBYTE) pszValue, (DWORD)strlen(pszValue)+1)!=ERROR_SUCCESS);
 		else {
 			lstrcpy(szTemp, "");
-			fFailed = (RegSetValueEx(hKey, pOpt->name, 0, REG_SZ, (LPBYTE) &szTemp, strlen(szTemp)+1)!=ERROR_SUCCESS);
+			fFailed = (RegSetValueEx(hKey, pOpt->name, 0, REG_SZ, (LPBYTE) &szTemp, (DWORD)strlen(szTemp)+1)!=ERROR_SUCCESS);
 		}
 		break;
 
@@ -545,7 +559,7 @@ bool RegSaveOpts(HKEY hKey, rc_option *pOpt, void* pValue)
 
 	case rc_float:
 		sprintf(szTemp, "%f", *(float*)pValue);
-		fFailed = (RegSetValueEx(hKey, pOpt->name, 0, REG_SZ, (LPBYTE) szTemp, strlen(szTemp)+1)!=ERROR_SUCCESS);
+		fFailed = (RegSetValueEx(hKey, pOpt->name, 0, REG_SZ, (LPBYTE) szTemp, (DWORD)strlen(szTemp)+1)!=ERROR_SUCCESS);
 		break;
 	}
 
@@ -561,7 +575,7 @@ void SaveGlobalSettings()
 
 	HKEY hKey;
 	DWORD dwDisposition;
-   	if ( RegCreateKeyEx(HKEY_CURRENT_USER, szKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
+	if ( RegCreateKeyEx(HKEY_CURRENT_USER, szKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
 		return;
 
 	rc_option* opts[10];
@@ -576,7 +590,7 @@ void SaveGlobalSettings()
 			case rc_float:
 				if ( !IsGlobalSetting(opts[sp]->name) || IgnoreSetting(opts[sp]->name) )
 					break;
-				
+
 				RegSaveOpts(hKey, opts[sp], opts[sp]->dest);
 				break;
 
@@ -666,7 +680,7 @@ void DeleteGlobalSettings()
 	lstrcpy(szKey, REG_BASEKEY);
 
 	HKEY hKey;
-   	if ( RegOpenKeyEx(HKEY_CURRENT_USER, szKey, 0, KEY_WRITE, &hKey)!=ERROR_SUCCESS )
+	if ( RegOpenKeyEx(HKEY_CURRENT_USER, szKey, 0, KEY_WRITE, &hKey)!=ERROR_SUCCESS )
 		return;
 
 	RegDeleteKey(hKey, REG_GLOBALS);
@@ -686,7 +700,7 @@ void SaveGameSettings(const char* const pszGameName)
 
 	HKEY hKey;
 	DWORD dwDisposition;
-   	if ( RegCreateKeyEx(HKEY_CURRENT_USER, szKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
+	if ( RegCreateKeyEx(HKEY_CURRENT_USER, szKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
 		return;
 
 	rc_option* opts[10];
@@ -796,7 +810,7 @@ void DeleteGameSettings(const char * const pszGameName)
 	lstrcpy(szKey, REG_BASEKEY);
 
 	HKEY hKey;
-   	if ( RegOpenKeyEx(HKEY_CURRENT_USER, szKey, 0, KEY_WRITE, &hKey)!=ERROR_SUCCESS )
+	if ( RegOpenKeyEx(HKEY_CURRENT_USER, szKey, 0, KEY_WRITE, &hKey)!=ERROR_SUCCESS )
 		return;
 
 	if ( pszGameName && *pszGameName )
@@ -906,7 +920,7 @@ BOOL PutSetting(const char* const pszGameName, const char* const pszName, VARIAN
 
 	HKEY hKey;
 	DWORD dwDisposition;
-   	if ( RegCreateKeyEx(HKEY_CURRENT_USER, szKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
+	if ( RegCreateKeyEx(HKEY_CURRENT_USER, szKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
 		return FALSE;
 
 	BOOL fSuccess = TRUE;
@@ -928,7 +942,7 @@ BOOL PutSetting(const char* const pszGameName, const char* const pszName, VARIAN
 			pszValue = szValue;
 			RegSaveOpts(hKey, option, &pszValue);
 			break;
-		
+
 		case rc_int:
 			VariantChangeType(&vValue, &vValue, 0, VT_I4);
 			RegSaveOpts(hKey, option, &vValue.lVal);
@@ -960,15 +974,15 @@ BOOL WriteRegistry(const char* const pszKey, const char* const pszName, DWORD dw
 	if ( !pszKey || !*pszKey )
 		return FALSE;
 
-   	if ( RegCreateKeyEx(HKEY_CURRENT_USER, pszKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
+	if ( RegCreateKeyEx(HKEY_CURRENT_USER, pszKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, &dwDisposition)!=ERROR_SUCCESS )
 		return FALSE;
 
-    if ( RegSetValueEx(hKey, pszName, 0, REG_DWORD, (LPBYTE) &dwValue, sizeof dwValue)!=ERROR_SUCCESS ) {
+	if ( RegSetValueEx(hKey, pszName, 0, REG_DWORD, (LPBYTE) &dwValue, sizeof dwValue)!=ERROR_SUCCESS ) {
 		RegCloseKey(hKey);
 		return FALSE;
 	}
 	RegCloseKey(hKey);
-	
+
 	return TRUE;
 }
 
@@ -982,12 +996,12 @@ DWORD ReadRegistry(const char* const pszKey, const char* const pszName, DWORD dw
 	if ( !pszKey || !*pszKey )
 		return FALSE;
 
-   	if ( RegOpenKeyEx(HKEY_CURRENT_USER, pszKey, 0, KEY_QUERY_VALUE, &hKey)!=ERROR_SUCCESS )
+	if ( RegOpenKeyEx(HKEY_CURRENT_USER, pszKey, 0, KEY_QUERY_VALUE, &hKey)!=ERROR_SUCCESS )
 		return dwValue;
 
 	dwType = REG_DWORD;
 	dwSize = sizeof dwValue;
-    if ( RegQueryValueEx(hKey, pszName, 0, &dwType, (LPBYTE) &dwValue, &dwSize)!=ERROR_SUCCESS )
+	if ( RegQueryValueEx(hKey, pszName, 0, &dwType, (LPBYTE) &dwValue, &dwSize)!=ERROR_SUCCESS )
 		dwValue = dwDefault;
 
 	RegCloseKey(hKey);

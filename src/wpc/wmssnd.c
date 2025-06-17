@@ -296,7 +296,8 @@ static MEMORY_WRITE_START(s67s_writemem )
   { 0x0400, 0x0403, pia_w(S67S_PIA0) },
   { 0x8400, 0x8403, pia_w(S67S_PIA0) },
 MEMORY_END
-static struct DACinterface      s67s_dacInt     = { 1, { 50 }};
+
+static struct DACinterface      s67s_dacInt     = { 1, { 40 }};
 static struct hc55516_interface s67s_hc55516Int = { 1, { 100 }, 55516, HC55516_FILTER_C8228 }; // The very first Williams speech board used the MC3417 (and not a HC555XX), but should not matter much in practice??
 
 /* THESE (at least) SHOULD BE USING MC3417, i.e. maybe split sys6 and sys7 sound and pick then on case per case basis??
@@ -355,6 +356,8 @@ static void s67s_init(struct sndbrdData *brdData) {
 
   // Note that the speech board games featured a potentiometer on the separate speech board to mix speech and sound (so it could be tweaked by the operator!).
   // For the moment, the mixing sounds okay as-is.
+
+  // If ever passing in per-game mixing levels via hw.gameSpecific2 (like done for Sys9/11/WPC), then note that we use that for Defender already, for its muxed solenoids.
 }
 
 static WRITE_HANDLER(s67s_ctrl_w) {
@@ -441,7 +444,7 @@ static MEMORY_WRITE_START(s9s_writemem)
   { 0x2000, 0x2003, pia_snd_w},
 MEMORY_END
 
-static struct DACinterface      s9s_dacInt     = { 1, { 50 }};
+static struct DACinterface      s9s_dacInt     = { 1, { 20 }};
 static struct hc55516_interface s9s_hc55516Int = { 1, { 100 }, 55536, HC55516_FILTER_C8228 }; // all boards were using a HC555XX
 
 MACHINE_DRIVER_START(wmssnd_s9s)
@@ -473,7 +476,7 @@ static void s11cs_ym2151IRQ(int state);
 // this would allow to emulate one on the mainboard, and one on the soundboard.
 // In practice, only the soundboard had them, while the mainboard was not populated anymore,
 // as on later System11 revisions, more and more audio components were moved from the MPU to the soundboard.
-static struct DACinterface      s11xs_dacInt2     = { 2, { 15, 15 }};
+static struct DACinterface      s11xs_dacInt2     = { 2, { 25, 25 }};
 static struct hc55516_interface s11b2s_hc55516Int = { 1, { 100 }, 55536, HC55516_FILTER_SYS11 };      // all boards were using a HC555XX
 static struct hc55516_interface s11xs_hc55516Int2 = { 2, { 100, 100 }, 55536, HC55516_FILTER_SYS11 }; // dto.
 
@@ -505,7 +508,7 @@ MACHINE_DRIVER_START(wmssnd_s11b2s)
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(s11s_readmem, s11s_writemem)
   MDRV_INTERLEAVE(50)
-  MDRV_SOUND_ADD_TAG("dac", DAC,    s11xs_dacInt2)
+  MDRV_SOUND_ADD_TAG("dac", DAC,    s11xs_dacInt2) // unused except for Jokerz boot sound?
   MDRV_SOUND_ADD_TAG("cvsd",HC55516,s11b2s_hc55516Int)
 MACHINE_DRIVER_END
 
@@ -551,13 +554,10 @@ static void s11s_init(struct sndbrdData *brdData) { // also Sys9 games use this 
   int ymvol = ((core_gameData->hw.gameSpecific2) >> 18) & 0x7f;
   int dacvol = ((core_gameData->hw.gameSpecific2) >> 25) & 0x7f;
 
-  // The system 9&11 games sound better with the HC gain turned up a bit by default.
   // Note that sys9 games featured a potentiometer on the separate speech board to mix speech and sound (so it could be tweaked by the operator!).
-  if (hcgain == 0)
-    hcgain = 150;
 
   if (hcgain != 0)
-    hc55516_set_gain(0, hcgain / 100.0);
+    hc55516_set_mixing_level(0, hcgain / 100.0);
   if (ymvol != 0)
     YM2151_set_mixing_levels(0, ymvol, ymvol);
   if (dacvol != 0)
@@ -628,7 +628,7 @@ static MEMORY_WRITE_START(s9p_writemem)
   { 0x4000, 0x4003, pia_w(S9P_PIA0) },
 MEMORY_END
 
-static struct DACinterface      s9p_dacInt      = { 1, { 60 }};
+static struct DACinterface      s9p_dacInt      = { 1, { 40 }};
 
 const struct sndbrdIntf s9psIntf = {
   "WMSS9P", s9p_init, NULL, s9p_diag, soundlatch_w, soundlatch_w, NULL, ext_hs_w
@@ -726,11 +726,11 @@ MEMORY_END
 // Note that the mix levels can be overridden per game, in case the defaults
 // don't sound good for a given game.  See WPCSND_HC55516_LEVELS in wmssnd.h
 // for instructions.
-static struct DACinterface      s11cs_dacInt      = { 1, { 15 }};
+static struct DACinterface      s11cs_dacInt      = { 1, { 100 }};
 static struct hc55516_interface s11cs_hc55516Int  = { 1, { 100 }, 55536, HC55516_FILTER_SYS11 }; // all boards were using a HC555XX
-static struct YM2151interface   s11cs_ym2151Int = {
+static struct YM2151interface   s11cs_ym2151Int   = {
 	1, 3579545, /* Hz */
-	{ YM3012_VOL(8, MIXER_PAN_CENTER, 8, MIXER_PAN_CENTER) },
+	{ YM3012_VOL(10, MIXER_PAN_CENTER, 10, MIXER_PAN_CENTER) },
 	{ s11cs_ym2151IRQ }
 };
 
@@ -852,7 +852,7 @@ MEMORY_END
 
 static struct YM2151interface   s11js_ym2151Int  = {
   1, 3579545, /* Hz */
-  { YM3012_VOL(30,MIXER_PAN_LEFT,30,MIXER_PAN_RIGHT) }, // Jokerz features a unique stereo board
+  { YM3012_VOL(35,MIXER_PAN_LEFT,35,MIXER_PAN_RIGHT) }, // Jokerz features a unique stereo board
   { s11js_ym2151IRQ }
 };
 
@@ -1047,7 +1047,7 @@ static WRITE_HANDLER( DCS89_YM2151_word_0_w )
 		// the chip OR a reference system that demonstrates the behavior,
 		// such as a WPC89 board.  At any rate, since the YM2151 emulators
 		// can't seem to get it right, a next-best approach is to handle it
-		// here, in the bridge bertween the WPC89 emulation and the YM2151
+		// here, in the bridge between the WPC89 emulation and the YM2151
 		// emulation.
 		if (locals.ym_reg_addr == 0x14 && data == 0x15)
 		{
@@ -1078,6 +1078,7 @@ static MEMORY_WRITE_START(wpcs_writemem)
   { 0x3400, 0x3400, hc55516_0_digit_clock_clear_w }, /* 3400-37ff */
   { 0x3800, 0x3800, wpcs_volume_w }, /* 3800-3bff */
   { 0x3c00, 0x3c00, wpcs_latch_w },  /* 3c00-3fff */
+  { 0xc000, 0xffff, MWA_NOP },
 MEMORY_END
 
 #else
@@ -1099,10 +1100,11 @@ static MEMORY_WRITE_START(wpcs_writemem)
   { 0x3400, 0x3400, hc55516_0_digit_clock_clear_w }, /* 3400-37ff */
   { 0x3800, 0x3800, wpcs_volume_w }, /* 3800-3bff */
   { 0x3c00, 0x3c00, wpcs_latch_w },  /* 3c00-3fff */
+  { 0xc000, 0xffff, MWA_NOP },
 MEMORY_END
 #endif
 
-// Relative mixing volumes for the WPC89 sound devices.  [mjr 5/2019] Adjusted the levels
+// Relative mixing volumes for the WPC89 sound devices.  [mjr 5/2019, re-tested 12/2024] Adjusted the levels
 // based on the original analog mixing levels inferred from the WPC89 schematics:
 //
 //  - HC55516 outputs 1.7V peak and goes through a 3.19 gain op-amp stage, for 5.4V peak
@@ -1110,19 +1112,18 @@ MEMORY_END
 //  - DAC (AD7524) outputs 3.8V peak (Vref, 12V at 10k/4.7k divider), unity gain op-amp, 3.8V peak
 //
 // Taking the HC55516 as the 100% reference point, the YM2151 peak voltage is 16% and the
-// DAC peak is 70%.  This seems about right subjectively, except that 16% for YM makes the
-// music a little too loud relative to the others, so let's keep that at 15%.
+// DAC peak is 70%.  This seems about right subjectively.
 //
 // Note that we can individually override any games where this doesn't sound right, as the
 // DAC and YM relative volume levels can be independently adjusted per game.  See
 // WPCSND_HC55516_LEVELS() in wmssnd.h to see how.
 //
 //[OLD NOTE, before HC55516 rewrite: These volume levels sound really good compared to my own Funhouse and T2: Dac=100%,CVSD=80%,2151=15%]
-static struct DACinterface      wpcs_dacInt     = { 1, { 70 }};
+static struct DACinterface      wpcs_dacInt = { 1, { 70 }};
 static struct hc55516_interface wpcs_hc55516Int = { 1, { 100 }, 55536, HC55516_FILTER_WPC89 }; // all boards were using a HC555XX, BUT some late WPC boards also used a MC3417 daughter board due to HC555XX shortages!
 static struct YM2151interface   wpcs_ym2151Int  = {
   1, 3579545, /* Hz */
-  { YM3012_VOL(15,MIXER_PAN_CENTER,15,MIXER_PAN_CENTER) },
+  { YM3012_VOL(16,MIXER_PAN_CENTER,16,MIXER_PAN_CENTER)},
   { wpcs_ym2151IRQ }
 };
 
@@ -1174,13 +1175,14 @@ static void wpcs_init(struct sndbrdData *brdData) {
   int hcgain = (core_gameData->hw.gameSpecific2 & 0x1ffff);
   int ymvol = ((core_gameData->hw.gameSpecific2) >> 18) & 0x7f;
   int dacvol = ((core_gameData->hw.gameSpecific2) >> 25) & 0x7f;
+
   locals.brdData = *brdData;
   /* the non-paged ROM is at the end of the image. move it to its correct place */
   memcpy(memory_region(REGION_CPU1+locals.brdData.cpuNo) + 0x00c000, locals.brdData.romRegion + 0x07c000, 0x4000);
   wpcs_rombank_w(0,0);
 
   if (hcgain != 0)
-	hc55516_set_gain(0, hcgain / 100.0);
+	hc55516_set_mixing_level(0, hcgain / 100.0);
   if (ymvol != 0)
 	YM2151_set_mixing_levels(0, ymvol, ymvol);
   if (dacvol != 0)
@@ -1192,7 +1194,7 @@ static void wpcs_init(struct sndbrdData *brdData) {
 /---------------------*/
 /*-- ADSP core functions --*/
 static void adsp_init(data8_t *(*getBootROM)(int soft),
-               void (*txData)(UINT16 start, UINT16 size, UINT16 memStep, double sRate));
+                      void (*txData)(UINT16 start, UINT16 size, UINT16 memStep, double sRate));
 static void adsp_boot(int soft);
 static void adsp_txCallback(int port, INT32 data);
 static WRITE16_HANDLER(adsp_control_w);
@@ -1736,9 +1738,9 @@ static WRITE16_HANDLER(adsp_control_w) {
       break;
     case S1_CONTROL_REG:
       if (((data>>4) & 3) == 2)
-	DBGLOG(("Oh no!, the data is compressed with u-law encoding\n"));
+        DBGLOG(("Oh no!, the data is compressed with u-law encoding\n"));
       if (((data>>4) & 3) == 3)
-	DBGLOG(("Oh no!, the data is compressed with A-law encoding\n"));
+        DBGLOG(("Oh no!, the data is compressed with A-law encoding\n"));
       break;
   } /* switch */
 }
@@ -1808,7 +1810,7 @@ static void adsp_txCallback(int port, INT32 data) {
     adsp_irqGen(0); /* first part, rest is handled via the timer */
     /*-- fire the irq timer --*/
     timer_adjust(adsp.irqTimer, 0, 0, TIME_IN_HZ(adsp_aBufData.sRate) *
-                      adsp_aBufData.size / adsp_aBufData.step / DCS_IRQSTEPS);
+                 adsp_aBufData.size / adsp_aBufData.step / DCS_IRQSTEPS);
     DBGLOG(("DCS size=%d,step=%d,rate=%d\n",adsp_aBufData.size,adsp_aBufData.step,adsp_aBufData.sRate));
     return;
   }
@@ -1819,14 +1821,14 @@ static void adsp_txCallback(int port, INT32 data) {
 #ifdef WPCDCSSPEEDUP
 /*
  *   Speedup for DCS games from 1994 and later.
- *   
+ *
  *   This is a hand-written C re-implementation of the core audio decoding
  *   loop contained in the ADSP-2100 ROM programs for Williams DCS machines
  *   built from 1994 onward.  The machines in this group share a nearly
  *   identical implementation of the decoding algorithm.  This native C
  *   implementation runs much faster than emulating the opcodes directly in
  *   the general-purpose emulation loop.
- *   
+ *
  *   The emulator *can* run the original code, but not quite fast enough.
  *   With current Intel hardware (fourth generation i5/i7) and the current
  *   ADSP-2100 emulator code, the emulated version can't consistently feed
@@ -1836,7 +1838,7 @@ static void adsp_txCallback(int port, INT32 data) {
  *   fast enough to keep up with real time, which eliminates the artifacts
  *   and greatly improves the audio quality.  It also takes a lot of load off
  *   the real CPU.
- *   
+ *
  *   This implementation appears to work with all DCS games except the three
  *   released in 1993: Star Trek: The Next Generation, Indiana Jones: The
  *   Pinball Adventure, and Judge Dredd.  Those three use a slightly
@@ -2035,24 +2037,9 @@ UINT32 dcs_speedup(UINT32 pc) {
 }
 
 
-/*static UINT16 reverse_bits(UINT16 b)
-{
-    return ((b >> 13) & 0x0001)
-        | ((b >> 11) & 0x0002)
-        | ((b >> 9)  & 0x0004)
-        | ((b >> 7)  & 0x0008)
-        | ((b >> 5)  & 0x0010)
-        | ((b >> 3)  & 0x0020)
-        | ((b >> 1)  & 0x0040)
-        | ((b << 1)  & 0x0080)
-        | ((b << 3)  & 0x0100)
-        | ((b << 5)  & 0x0200)
-        | ((b << 7)  & 0x0400)
-        | ((b << 9)  & 0x0800)
-        | ((b << 11) & 0x1000)
-        | ((b << 13) & 0x2000);
-}*/
-
+#if defined(_M_ARM64) || defined(__aarch64__)
+#define reverse_bits __brev14
+#else
 static const UINT16 reverse_table[0x2008] = {
 	0x0, 0x2000, 0x1000, 0x3000, 0x800, 0x2800, 0x1800, 0x3800, 0x400, 0x2400, 0x1400, 0x3400, 0xC00, 0x2C00, 0x1C00, 0x3C00,
 	0x200, 0x2200, 0x1200, 0x3200, 0xA00, 0x2A00, 0x1A00, 0x3A00, 0x600, 0x2600, 0x1600, 0x3600, 0xE00, 0x2E00, 0x1E00, 0x3E00,
@@ -2569,6 +2556,7 @@ static const UINT16 reverse_table[0x2008] = {
 	0x1, 0x2001, 0x1001, 0x3001, 0x801, 0x2801, 0x1801, 0x3801 };
 
 #define reverse_bits(b) reverse_table[b]
+#endif
 
 /*
  *   Speedup for DCS games from 1993.  This is a special version of the
@@ -2605,7 +2593,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
          *   reference only; the other games that use the same code have it
          *   at different addresses.
          */
-        
+
         /* 00E8     I0 = $3800 */
         i0 = &ram[0x3800];
 
@@ -2701,7 +2689,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
          *   here as "memXXX" locations only for ease of reference back to
          *   the original ROM code.
          */
-        
+
         /* 0101     AR = $0002 */
         /* 0102     WORD PTR [$621] = AR */
         mem621 = 2;
@@ -2738,7 +2726,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
              *   extra right-shift instruction (as it requires two bus cycles
              *   to physical memory).
              */
-            
+
             /* 010A   I4 = PGM WORD PTR [$1780] */
             i4 = (UINT32 *)&OP_ROM[ADSP2100_PGM_OFFSET + (0x1780<<2)];
 
@@ -2750,7 +2738,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
 
             /* 010D   I1 = $3800 */
             i1 = &ram[0x3800];
-            
+
             /* 010E   AY0 = WORD PTR [$622] */
             /* 010F   M2 = AY0 */
             m2 = mem622;
@@ -2786,7 +2774,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
                 {
                     INT16 mx1, ax0, ay0, ay1, ar;
                     INT32 tmp, mr;
-                    
+
                     /* 011B   MR = (MX0 * MY0) << 1, MX1 = DM(I1,M1) */
                     mx1 = *i1++;
                     mr = ((INT32)mx0 * my0) << 1;
@@ -2799,7 +2787,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
                     /* 011D   MR = (MX1 * MY0) << 1 (SS), AX0 = MR1 */
                     ax0 = mr >> 16;
                     mr = ((INT32)mx1 * my0) << 1;
-                    
+
                     /* 011E   MR += (MX0 * MY1) << 1 (RND), AY1 = DM(I0,M0) */
                     ay1 = *i0--;
                     tmp = (((INT32)mx0 * my1)<<1);
@@ -2812,7 +2800,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
                     /* 0120   AR = AX0 + AY0, DM(I0,M1) = AR */
                     *i0++ = ar;
                     ar = ax0 + ay0;
-                    
+
                     /* 0121   AR = AY1 - MR1, DM(I2,M1) = AR */
                     *i2++ = ar;
                     ar = ay1 - (mr >> 16);
@@ -2820,7 +2808,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
                     /* 0122   AR = MR1 + AY1, DM(I0,M1) = AR */
                     *i0++ = ar;
                     ar = (mr >> 16) + ay1;
-                    
+
                     /* 0123   DM(I2,M1) = AR */
                     *i2++ = ar;
                 }
@@ -2830,7 +2818,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
 
                 /* 0125   MODIFY (I1,M3) */
                 i1 += m3;
-                
+
                 /* 0126   MODIFY (I0,M2) */
                 i0 += m2;
             }
@@ -2850,7 +2838,7 @@ UINT32 dcs_speedup_1993(UINT32 pc)
         }
     }
 
-	/* 
+	/*
 	 *   This appears to be a Fast Fourier Transform pass over the decoded
 	 *   buffer (we infer this from the use of bit-reverse address mode,
 	 *   which seems to be useful primarily [or maybe exclusively] to
