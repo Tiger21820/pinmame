@@ -1,4 +1,4 @@
-# PinMAME
+# PinMAME52
 
 *Pinball Multiple Arcade Machine Emulator*
 
