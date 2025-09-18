@@ -219,8 +219,9 @@ DRIVERNV(slbmanic)      //          12/13 Silverball Mania (Horseshoe Spot MOD r
 DRIVERNV(slbmanid)      //          12/13 Silverball Mania (Horseshoe No Spotting MOD rev. 13)
 DRIVERNV(spaceinv)      //BY35-792: 04/80 Space Invaders
 DRIVERNV(spaceinb)      //          11/02 Space Invaders (7-digit conversion)
-DRIVERNV(rollston)      //BY35-796: 05/80 Rolling Stones
-DRIVERNV(rollstob)      //          11/02 Rolling Stones (7-digit conversion)
+DRIVERNV(rollston)      //BY35-796: 05/80 Rolling Stones (V17)
+DRIVERNV(rollst21)      //          ??/80 Rolling Stones (V21)
+DRIVERNV(rollstob)      //          11/02 Rolling Stones (V17, 7-digit conversion)
 DRIVERNV(mystic  )      //BY35-798: 06/80 Mystic
 DRIVERNV(mysticb )      //          11/02 Mystic (7-digit conversion)
 DRIVERNV(viking  )      //BY35-802: 07/80 Viking
@@ -2533,6 +2534,7 @@ DRIVER(grgar,l1ff)      //          11/79 W Gorgar (L-1 Free Play Fix)
 DRIVER(grgar,t1)        //                  Gorgar (T-1 /10 Scoring Ted Estes)
 DRIVER(grgar,t1ff)      //                  Gorgar (T-1 /10 Scoring Ted Estes, Free Play Fix)
 DRIVER(grgar,c1)        //                  Gorgar (C-1 Lane Change MOD)
+DRIVER(grgar,l2)        //          ??/79 W Gorgar (L-2)
 DRIVER(lzbal,l2)        //S6-493:   12/79 W Laser Ball (L-2)
 DRIVER(lzbal,l2ff)      //          12/79 W Laser Ball (L-2 Free Play Fix)
 DRIVER(lzbal,l2sp)      //                  Laser Ball (L-2, PROM sound)
@@ -2712,6 +2714,7 @@ DRIVER(bk2k,pa5)        //          04/89 W Black Knight 2000 (PA-5 Prototype)
                         //S11:      05/89 W Pool
 //First Game produced entirely by Williams after Merger to use Bally Name
 DRIVER(tsptr,l3)        //S11-2630: 07/89 B Transporter the Rescue (L-3)
+DRIVER(tsptr,l3fj)      //          07/25 B Transporter the Rescue (L-3 Fixed Jackpot MOD)
 DRIVER(tsptr,lu3)       //          07/89 B Transporter the Rescue (LU-3)
 DRIVER(tsptr,l1)        //          06/89 B Transporter the Rescue (LA-1)
 DRIVER(polic,l2)        //S11-573:  08/89 W Police Force (LA-2)
