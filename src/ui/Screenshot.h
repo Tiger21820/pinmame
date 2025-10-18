@@ -10,11 +10,7 @@
 
  ***************************************************************************/
 
-#ifndef SCREENSHOT_H
-#define SCREENSHOT_H
-#if !defined(__GNUC__) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4) || (__GNUC__ >= 4)	// GCC supports "pragma once" correctly since 3.4
 #pragma once
-#endif
 
 typedef struct _mybitmapinfo
 {
@@ -22,10 +18,6 @@ typedef struct _mybitmapinfo
 	int bmHeight;
 	int bmColors;
 } MYBITMAPINFO, *LPMYBITMAPINFO;
-
-#ifdef MESS
-extern BOOL LoadScreenShotEx(int nGame, LPCSTR lpSoftwareName, int nType);
-#endif /* MESS */
 
 extern BOOL LoadScreenShot(int nGame, int nType);
 extern HANDLE GetScreenShotHandle(void);
@@ -37,5 +29,3 @@ extern BOOL ScreenShotLoaded(void);
 
 extern BOOL LoadDIB(LPCTSTR filename, HGLOBAL *phDIB, HPALETTE *pPal, BOOL flyer);
 extern HBITMAP DIBToDDB(HDC hDC, HANDLE hDIB, LPMYBITMAPINFO desc);
-
-#endif

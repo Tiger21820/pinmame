@@ -6,11 +6,7 @@
 
 ***************************************************************************/
 
-#ifndef CPUINTRF_H
-#define CPUINTRF_H
-#if !defined(__GNUC__) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4) || (__GNUC__ >= 4)	// GCC supports "pragma once" correctly since 3.4
 #pragma once
-#endif
 
 #include "osd_cpu.h"
 #include "memory.h"
@@ -339,39 +335,6 @@ enum
 #endif
 #if (HAS_E132XS)
 	CPU_E132XS,
-#endif
-
-#ifdef MESS
-#if (HAS_APEXC)
-	CPU_APEXC,
-#endif
-#if (HAS_CDP1802)
-	CPU_CDP1802,
-#endif
-#if (HAS_CP1600)
-	CPU_CP1600,
-#endif
-#if (HAS_F8)
-	CPU_F8,
-#endif
-#if (HAS_LH5801)
-	CPU_LH5801,
-#endif
-#if (HAS_PDP1)
-	CPU_PDP1,
-#endif
-#if (HAS_SATURN)
-	CPU_SATURN,
-#endif
-#if (HAS_SC61860)
-	CPU_SC61860,
-#endif
-#if (HAS_Z80GB)
-	CPU_Z80GB,
-#endif
-#if (HAS_Z80_MSX)
-	CPU_Z80_MSX,
-#endif
 #endif
     CPU_COUNT
 };
@@ -861,5 +824,3 @@ INLINE int cpu_gettotalcpu(void)
 #ifdef __cplusplus
 }
 #endif
-
-#endif	/* CPUINTRF_H */

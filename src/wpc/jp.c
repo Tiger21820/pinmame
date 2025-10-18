@@ -78,7 +78,7 @@ static INTERRUPT_GEN(JP_vblank) {
 
 static SWITCH_UPDATE(JP) {
 #ifdef MAME_DEBUG
-  static char s[4];
+  static char s[3];
   static int sndcmd = 3;
   int i;
   if (cpu_gettotalcpu() > 1) {
@@ -145,7 +145,7 @@ static void dispStrobe(void) {
   default:
     // all player scores, match & credits displays
     for (i=0; i < 32; i++)
-      if (locals.dispData & (1 << i)) locals.segments[pos[i]].w &= ~(1 << (locals.sixColumns ? data : 6 - data));
+      if (locals.dispData & (1 << i)) locals.segments[pos[i]].w &= ~(1u << (locals.sixColumns ? data : 6 - data));
     // fake single points zero digits
     for (i=0; i < 4; i++)
       locals.segments[i*7 + 6].w = (locals.segments[i*7 + 5].w) ? core_bcd2seg7[0] : 0;
@@ -224,8 +224,8 @@ static WRITE_HANDLER(qs1pin_2_out) {
 static HC4094interface hc4094jp = {
   4, // 4 chips
   { parallel_0_out, parallel_1_out, parallel_2_out, parallel_3_out },
-  { 0 },
-  { qs1pin_0_out, qs1pin_1_out, qs1pin_2_out }
+  { 0, 0, 0, 0 },
+  { qs1pin_0_out, qs1pin_1_out, qs1pin_2_out, NULL }
 };
 
 static WRITE_HANDLER(ay8910_ctrl_w) { AY8910Write(0,0,data); }
@@ -329,6 +329,7 @@ static struct MSM5205interface JP_msm5205Int = {
 	384000,				//Clock Frequency
 	{JP_msmIrq},		//VCLK Int. Callback
 	{MSM5205_S48_4B},	//Sample Mode
+	{0},
 	{60}				//Volume
 };
 
@@ -416,8 +417,8 @@ struct AY8910interface JP2_ay8910Int2 = {
     2,              /* 2 chips */
     2000000,        /* 2 MHz ? */
     { MIXER(30,MIXER_PAN_LEFT), MIXER(30,MIXER_PAN_RIGHT) },     /* Volume */
-    { NULL },
-    { NULL },
+    { NULL, NULL },
+    { NULL, NULL },
     { ay8910_0_portA_w, ay8910_1_portA_w },
     { ay8910_0_portB_w, ay8910_1_portB_w },
 };

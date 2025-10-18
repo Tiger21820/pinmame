@@ -176,7 +176,7 @@ struct AY8910interface zsu_8910Int = {
   2,
   2000000,
   { 30, 30 },
-  { NULL }, { NULL },
+  { NULL, NULL }, { NULL, NULL },
   { ay8910_0_a_w, ay8910_1_a_w }
 };
 
@@ -185,6 +185,7 @@ static struct MSM5205interface zsu_msm5205Int = {
   0, //500000, // connected but not needed because VCLK pin is being used, saves a timer
   {NULL},
   {MSM5205_SEX_4B},
+  {0},
   {50}
 };
 

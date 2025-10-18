@@ -6,11 +6,7 @@
 
 ***************************************************************************/
 
-#ifndef _MEMORY_H
-#define _MEMORY_H
-#if !defined(__GNUC__) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4) || (__GNUC__ >= 4)	// GCC supports "pragma once" correctly since 3.4
 #pragma once
-#endif
 
 #include "osd_cpu.h"
 #include <stddef.h>
@@ -62,10 +58,6 @@ extern "C" {
 #define CPUREADOP_SAFETY_NONE		0
 #define CPUREADOP_SAFETY_PARTIAL	0
 #define CPUREADOP_SAFETY_FULL		1
-#elif defined(MESS)
-#define CPUREADOP_SAFETY_NONE		0
-#define CPUREADOP_SAFETY_PARTIAL	1
-#define CPUREADOP_SAFETY_FULL		0
 #else
 #define CPUREADOP_SAFETY_NONE		1
 #define CPUREADOP_SAFETY_PARTIAL	0
@@ -964,5 +956,3 @@ do {																					\
 #ifdef __cplusplus
 }
 #endif
-
-#endif	/* !_MEMORY_H */

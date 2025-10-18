@@ -45,7 +45,7 @@ const struct sndbrdIntf de1sIntf = {
 
 static struct MSM5205interface de1s_msm5205Int = {
 /* chip          interrupt */
-     1, 384000,	{ de1s_msmIrq }, { MSM5205_S48_4B }, { 60 }
+     1, 384000,	{ de1s_msmIrq }, { MSM5205_S48_4B }, { 0 }, { 60 }
 };
 
 static struct YM2151interface de1s_ym2151Int = {
@@ -768,8 +768,8 @@ static void at91_sh_update(int num, INT16 *buffer[2], int length)
 
 int at91_sh_start(const struct MachineSound *msound)
 {
-	const char* stream_name[2] = { "AT91 Channel #1", "AT91 Channel #2" };
-	int volume[2] = { MIXER(100, MIXER_PAN_LEFT), MIXER(100, MIXER_PAN_RIGHT) };
+	static const char* stream_name[2] = { "AT91 Channel #1", "AT91 Channel #2" };
+	static const int volume[2] = { MIXER(100, MIXER_PAN_LEFT), MIXER(100, MIXER_PAN_RIGHT) };
 	/*-- allocate a DAC stream at fixed frequency --*/
 	return stream_init_multi
 		(2,

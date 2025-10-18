@@ -53,7 +53,7 @@ typedef void(*DmdDev_Render_16_Shades_with_Raw_t)(UINT16 width, UINT16 height, U
 typedef void(*DmdDev_Render_4_Shades_with_Raw_t)(UINT16 width, UINT16 height, UINT8* frame, UINT32 noOfRawFrames, UINT8* rawbuffer);
 typedef void(*DmdDev_Render_PM_Alphanumeric_Frame_t)(core_segOverallLayout_t layout, const UINT16* const seg_data, const UINT16* const seg_data2);
 typedef void(*DmdDev_Render_PM_Alphanumeric_Dim_Frame_t)(core_segOverallLayout_t layout, const UINT16* const seg_data, const char* const seg_dim, const UINT16* const seg_data2);
-typedef void(*DmdDev_Render_Lum_And_Raw_t)(UINT16 width, UINT16 height, UINT8* lumFrame, UINT8* rawFrame, UINT32 noOfRawFrames, UINT8* rawbuffer);
+typedef void(*DmdDev_Render_Lum_And_Raw_t)(UINT16 width, UINT16 height, UINT8* lumFrame, UINT8* rawFrame, UINT8 rawBitSize);
 
 typedef struct {
 	HMODULE hModule;
@@ -79,7 +79,7 @@ typedef struct {
 static bool        dmd_hasDMD = false; // Used to send a black frame for clean close
 static UINT16      dmd_width = 0; // Only valid if dmd_hasDMD is set
 static UINT16      dmd_height = 0; // Only valid if dmd_hasDMD is set
-static dmddevice_t dmdDevices[2] = { {0} };
+static dmddevice_t dmdDevices[2] = { };
 
 extern "C"
 {
@@ -129,7 +129,6 @@ extern "C" int dmddeviceInit(const char* GameName, UINT64 HardwareGeneration, co
 		// look for the DmdDevice(64).dll and DmdScreen(64).dll in the path of vpinmame.dll/libpinmame-X.X.dll
 		char filename[MAX_PATH];
 		GetModuleFileName(hCurrentModule, filename, MAX_PATH);
-		strcpy(filename, filename);
 		char* ptr = strrchr(filename, '\\');
 #ifdef _WIN64
 		strcpy(ptr + 1, i == 0 ? "DmdDevice64.dll" : "DmdScreen64.dll");
@@ -193,6 +192,8 @@ extern "C" void dmddeviceDeInit() {
 }
 
 extern "C" void dmddeviceRenderDMDFrame(const int width, const int height, UINT8* dmdDotLum, UINT8* dmdDotRaw, UINT32 noOfRawFrames, UINT8* rawbuffer, const int isDMD2) {
+	// 16 shades based on hardware generation and extended to some GTS3 games using long PWM pattern (SMB, SMBMW and CBW)
+	const int is16Shades = (core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG_DMD2)) || (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0) || (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0);
 	dmd_width = width; // store for DeInit
 	dmd_height = height;
 	dmd_hasDMD = true;
@@ -203,7 +204,7 @@ extern "C" void dmddeviceRenderDMDFrame(const int width, const int height, UINT8
 		if (dmdDevices[i].Render_Lum_And_Raw)
 		{
 			// New implementation that sends both luminance information for rendering, and combined bitplanes as well as raw frames for frame identification for colorization & triggering events
-			dmdDevices[i].Render_Lum_And_Raw(width, height, dmdDotLum, dmdDotRaw, noOfRawFrames, rawbuffer);
+			dmdDevices[i].Render_Lum_And_Raw(width, height, dmdDotLum, dmdDotRaw, is16Shades ? 4 : 2);
 		}
 		else
 		{
@@ -213,8 +214,6 @@ extern "C" void dmddeviceRenderDMDFrame(const int width, const int height, UINT8
 			// - for others: send identification frames
 			// This is somewhat hacky but needed until all external dmddevice.dll are updated to the new implementation
 			UINT8* frame = dmdDotRaw;
-			// 16 shades based on hardware generation and extended to some GTS3 games using long PWM pattern (SMB, SMBMW and CBW)
-			const int is16Shades = (core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG_DMD2)) || (strncasecmp(Machine->gamedrv->name, "smb", 3) == 0) || (strncasecmp(Machine->gamedrv->name, "cueball", 7) == 0);
 			if (core_gameData->gen & GEN_GTS3) {
 				const int shift = is16Shades ? 4 : 6;
 				frame = (UINT8*)malloc(width * height);

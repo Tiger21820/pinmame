@@ -475,6 +475,7 @@ static struct MSM5205interface INDER_msm5205Int = {
 	384000,				//384Khz Clock Frequency?
 	{INDER_msmIrq},		//VCLK Int. Callback
 	{MSM5205_S48_4B},	//Sample Mode
+	{0},
 	{100}				//Volume
 };
 
@@ -646,12 +647,13 @@ static WRITE_HANDLER(INDER_S1_MSM5205_w);
 static WRITE_HANDLER(INDER_S2_MSM5205_w);
 
 /* MSM5205 ADPCM CHIP INTERFACE */
-static struct MSM5205interface inder_msm5205Int2 = {
-	2,										//# of chips (effects / music)
-	640000,									//384Khz Clock Frequency according to schematic, but speech needs faster clock!
+static struct MSM5205interface inder_msm5205Int2 = { // Metal Man
+	2,										//# of chips (0:effects / 1:music)
+	384000,									//according to schematic
 	{INDER_S1_msmIrq, INDER_S2_msmIrq},		//VCLK Int. Callback
-	{MSM5205_S64_4B, MSM5205_S96_4B},		//Sample Mode
-	{80,50}								//Volume
+	{MSM5205_S48_4B, MSM5205_S48_4B},		//Sample Mode
+	{0,0},
+	{80,50}									//Volume
 };
 
 // (always ff? ignore it for now)
@@ -666,10 +668,9 @@ static READ_HANDLER(ci20_portb_r2) {
 // display strobes are reversed on Metal Man
 static WRITE_HANDLER(ci23_portc_w2) {
   int i;
-  if ((data & 0x0f) < 7) {
+  if ((data & 0x0f) < 7)
     for (i=0; i < 7; i++)
       coreGlobals.segments[8*i + 7 - (data & 0x07)].w = locals.dispSeg[i];
-  }
 }
 
 /*
@@ -943,11 +944,12 @@ MACHINE_DRIVER_START(INDERS2)
   MDRV_SOUND_ADD(MSM5205, inder_msm5205Int2)
 MACHINE_DRIVER_END
 
-static struct MSM5205interface INDER_msm5205IntRana = {
+static struct MSM5205interface INDER_msm5205IntRana = { // La Rana bowl games
   1,
   640000., // no idea, sounds OK
   {INDER_msmIrq},
   {MSM5205_S48_4B},
+  {0},
   {100}
 };
 

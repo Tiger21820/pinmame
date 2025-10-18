@@ -113,10 +113,11 @@ static void mac_msmIrq(int data) {
 }
 
 static struct MSM5205interface MAC_msm5205Int = {
-  1,					//# of chips
-  384000,				//384Khz Clock Frequency
+  1,				//# of chips
+  384000,			//384Khz Clock Frequency
   {mac_msmIrq},		//VCLK Int. Callback
   {MSM5205_S48_4B},	//Sample Mode
+  {0},
   {100}				//Volume
 };
 
@@ -131,10 +132,9 @@ static UINT16 mac_bcd2seg(UINT8 data) {
 
 // handles the 8279 keyboard / display interface chip
 static READ_HANDLER(i8279_r) {
-  int row;
 //logerror("i8279 r%d (cmd %02x, reg %02x)\n", offset, locals.i8279cmd, locals.i8279reg);
   if ((locals.i8279cmd & 0xe0) == 0x40) {
-    row = locals.i8279reg & 0x07;
+    int row = locals.i8279reg & 0x07;
     if (row < 2) locals.i8279data = core_getDip(row); // read dips
     else locals.i8279data = coreGlobals.swMatrix[row - 1]; // read switches
   } else if ((locals.i8279cmd & 0xe0) == 0x60)

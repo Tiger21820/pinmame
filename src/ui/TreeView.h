@@ -10,11 +10,7 @@
 
  ***************************************************************************/
 
-#ifndef TREEVIEW_H
-#define TREEVIEW_H
-#if !defined(__GNUC__) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4) || (__GNUC__ >= 4)	// GCC supports "pragma once" correctly since 3.4
 #pragma once
-#endif
 
 /* corrections for commctrl.h */
 
@@ -89,11 +85,6 @@ enum
 	FOLDER_ALLGAMES,
 	FOLDER_AVAILABLE,
 	FOLDER_UNAVAILABLE,
-#ifdef MESS
-	FOLDER_CONSOLE,
-	FOLDER_COMPUTER,
-	FOLDER_MODIFIED,
-#endif
 	FOLDER_MANUFACTURER,
 	FOLDER_YEAR,
 	FOLDER_SOURCE,
@@ -122,11 +113,6 @@ typedef enum
 	F_ORIGINALS     = 0x00000020,
 	F_WORKING       = 0x00000040,
 	F_AVAILABLE     = 0x00000080,
-#ifdef MESS
-	F_COMPUTER      = 0x00000200,
-	F_CONSOLE       = 0x00000400,
-	F_MODIFIED      = 0x00000800,
-#endif
 	F_MASK          = 0x00000FFF,
 	F_CUSTOM        = 0x01000000  // for current .ini custom folders
 } FOLDERFLAG;
@@ -187,5 +173,3 @@ int GetTreeViewIconIndex(int icon_id);
 
 void ResetTreeViewFolders(void);
 void SelectTreeViewFolder(int folder_id);
-
-#endif /* TREEVIEW_H */

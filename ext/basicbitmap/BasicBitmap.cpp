@@ -3901,7 +3901,7 @@ void BasicBitmap::RowStoreWithPalette(int x, int y, IUINT32 *card, int w,
 //---------------------------------------------------------------------
 int BasicBitmap::BestfitColor(const BasicColor *pal, int r, int g, int b, int size)
 {
-	static IUINT32 diff_lookup[512 * 3] = { 0 };
+	static IUINT32 diff_lookup[512 * 3] = { };
 	long lowest = 0x7FFFFFFF, bestfit = 0;
 	long i;
 	const BasicColor *rgb;
@@ -5124,7 +5124,7 @@ int BasicBitmap::SavePPM(const char *filename) const
 	const BasicBitmap *dst = this;
 	BasicBitmap *tmp = NULL;
 
-	if (fmt != A8R8G8B8 || fmt != X8R8G8B8) {
+	if (fmt != A8R8G8B8 && fmt != X8R8G8B8) {
 		tmp = new BasicBitmap(_w, _h, A8R8G8B8);
 		/*if (tmp == NULL) {
 			fclose(fp);

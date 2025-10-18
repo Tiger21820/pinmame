@@ -167,8 +167,6 @@ extern void stream_free(int channel);
 
 void gts80s_init(struct sndbrdData *brdData) {
 	int i;
-	UINT8 *pMem;
-
 	memset(&GTS80S_locals, 0x00, sizeof GTS80S_locals);
 
 	GTS80S_locals.boardData = *brdData;
@@ -191,7 +189,7 @@ void gts80s_init(struct sndbrdData *brdData) {
 		/* clear the upper 4 bits, some ROM images aren't 0 */
 		/* the 6530 RIOT ROM is not used by the boards which have a PiggyPack installed */
 		UINT8* mr = memory_region(GTS80S_locals.boardData.cpuNo);
-		pMem = mr+0x0400;
+		UINT8* pMem = mr+0x0400;
 		for(i=0x0400; i<0x0bff; i++)
 			*pMem++ &= 0x0f;
 
@@ -368,7 +366,7 @@ static WRITE_HANDLER(GTS80SS_riot3b_w) { logerror("riot3b_w: 0x%02x\n", data);}
 static WRITE_HANDLER(GTS80SS_da1_latch_w) {
 //	logerror("da1_w: 0x%02x\n", data);
 
-	float tmp = (((INT32)data << 8) - (INT32)0x7F80)*(float)(1.0/32768.0);
+	float tmp = (float)(((INT32)data << 8) - (INT32)0x7F80)*(float)(1.0/32768.0);
 
 //	logerror("%s %.8f %d\n", (GTS80SS_locals.last_sound == 0) ? "c2" : "c ", timer_get_time(), tmp);
 
@@ -1097,10 +1095,10 @@ static struct AY8910interface GTS80BS_ay8910Int = {
 	2,			/* 2 chips */
 	2000000,	/* 2 MHz */
 	{ 25, 25 }, /* Volume */
-	{ 0 },
-	{ 0 },
-	{ 0 },
-	{ 0 }
+	{ 0, 0 },
+	{ 0, 0 },
+	{ 0, 0 },
+	{ 0, 0 }
 };
 
 static struct YM2151interface GTS80BS_ym2151Int =

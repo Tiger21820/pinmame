@@ -7,6 +7,7 @@
 ***************************************************************************/
 
 #include <math.h>
+#include <assert.h>
 
 #include "driver.h"
 #include "timer.h"
@@ -750,6 +751,7 @@ READ32_HANDLER( watchdog_reset32_r )
 static void reset_callback(int param)
 {
 	int cpunum = param & 0xff;
+	assert(cpunum < MAX_CPU);
 	int state = param >> 8;
 
 	/* if we're asserting the line, just halt the CPU */

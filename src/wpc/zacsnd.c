@@ -78,7 +78,7 @@ MACHINE_DRIVER_START(zac1125)
 MACHINE_DRIVER_END
 
 static struct {
-  UINT8 ctrl;
+  //UINT8 ctrl;
   double ne555_voltage;
   mame_timer *ne555;
 } s1125locals;
@@ -312,7 +312,8 @@ static struct TMS5220interface sns_tms5220Int = { 640000, 75, sns_5220Irq, sns_5
 static struct DACinterface     sns_dacInt = { 1, { 20 }};
 static struct DACinterface     sns2_dacInt = { 2, { 20, 20 }};
 static struct AY8910interface  sns_ay8910Int = { 1, 3579545./4., {25}, {sns_8910a_r}, {0}, {0}, {sns_8910b_w}};
-static struct AY8910interface  sns2_ay8910Int = { 2, 3579545./4., {25, 25}, {sns_8910a_r, sns2_8910a_r}, {0}, {0}, {sns_8910b_w}};
+// sns2_ay8910Int: There is no handler for the B port write of the 2nd AY chip. In fact the code never actually uses the additional functions, so the 2nd AY chip is never accessed on any (known) game/ROM that has the 1B13136 sound board.
+static struct AY8910interface  sns2_ay8910Int = { 2, 3579545./4., {25, 25}, {sns_8910a_r, sns2_8910a_r}, {0, 0}, {0, 0}, {sns_8910b_w, 0}};
 
 static READ_HANDLER(m00df_r) {
   return 0xff; // unmapped memory should usually read as all high bits
@@ -642,7 +643,7 @@ static WRITE_HANDLER(sns_data_w) {
       break;
     case SNDBRD_ZAC11178_13181:
       pia_set_input_ca1(SNS_PIA1, (data & 0xc0) == 0xc0); // CA1 is fed by DB6 & DB7 from daughter board (same signals as on main board though)
-      // cpu reads command from adress b0 after nmi !!!
+      // cpu reads command from address b0 after nmi !!!
       if ((~data & 0x40) && (data & 0x80)) cpu_set_nmi_line(ZACSND_CPUB, PULSE_LINE);
       break;
     case SNDBRD_ZAC13181x3:
@@ -756,7 +757,6 @@ static UINT8 sawtoothWave45[64];
 
 static int sns_sh_start(const struct MachineSound *msound) {
   UINT8 i;
-  int mixing_levels[4] = {MIXER(15,MIXER_PAN_LEFT),MIXER(15,MIXER_PAN_LEFT),MIXER(15,MIXER_PAN_RIGHT),MIXER(15,MIXER_PAN_RIGHT)};
   for (i=0; i < 64; i++) {  // reverse waves
     triangleWaver[63-i]=triangleWave[i];
     sawtoothWaver[63-i]=sawtoothWave[i];
@@ -773,6 +773,7 @@ static int sns_sh_start(const struct MachineSound *msound) {
   UpdateZACSoundLED(1, 1);
   if (!snslocals.channel) {
     // allocate channels
+    static const int mixing_levels[4] = {MIXER(15,MIXER_PAN_LEFT),MIXER(15,MIXER_PAN_LEFT),MIXER(15,MIXER_PAN_RIGHT),MIXER(15,MIXER_PAN_RIGHT)};
     snslocals.channel = mixer_allocate_channels(4, mixing_levels);
     mixer_set_name  (snslocals.channel,   "CEM 3374 A TR");
     mixer_set_name  (snslocals.channel+1, "CEM 3374 A SA");

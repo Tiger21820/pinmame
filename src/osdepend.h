@@ -1,8 +1,4 @@
-#ifndef OSDEPEND_H
-#define OSDEPEND_H
-#if !defined(__GNUC__) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4) || (__GNUC__ >= 4)	// GCC supports "pragma once" correctly since 3.4
 #pragma once
-#endif
 
 #include "osd_cpu.h"
 #ifdef PINMAME
@@ -440,10 +436,6 @@ int osd_net_game_init(void);
 int osd_net_game_exit(void);
 #endif /* MAME_NET */
 
-#ifdef MESS
-/* this is here to follow the current mame file hierarchy style */
-#include "osd_mess.h"
-#endif
 #if (!defined(PINMAME) || defined(MAME_DEBUG) || defined(_DEBUG)) // In PinMAME, log only in debug mode.
 #ifdef __GNUC__
 void CLIB_DECL logerror(const char *text,...)
@@ -457,6 +449,4 @@ INLINE void CLIB_DECL logerror(const char *text,...) {}
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

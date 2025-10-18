@@ -241,16 +241,17 @@ static struct AY8910interface slalom_ay8910Int = {
   2,
   1500000,
   { MIXER(30,MIXER_PAN_LEFT), MIXER(30,MIXER_PAN_RIGHT) },
-  { 0 }, { 0 },
+  { 0, 0 }, { 0, 0 },
   { DAC_0_data_w, msm_ctrl_w },
   { 0, msm_data_w }
 };
 
 static struct MSM5205interface slalom_msm5205Int = {
   1,
-  375000,
+  375000, // 384000? // but via MAME: XTAL(12'000'000)/2/16 = 375 kHz
   { msmIrq },
   { MSM5205_S48_4B },
+  {0},
   { 100 }
 };
 

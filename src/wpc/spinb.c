@@ -319,27 +319,21 @@ static ppi8255_interface ppi8255_intf =
 	{ci20_portc_w, ci23_portc_w, ci22_portc_w, ci21_portc_w, snd1_portc_w, snd2_portc_w},		/* Port C write */
 };
 /* MSM5205 ADPCM CHIP INTERFACE */
-static struct MSM5205interface SPINB_msm5205Int = {
+static struct MSM5205interface SPINB_msm5205Int = { // Bushido, Mach 2
 	2,										//# of chips
 	384000,									//384Khz Clock Frequency
 	{SPINB_S1_msmIrq, SPINB_S2_msmIrq},		//VCLK Int. Callback
 	{MSM5205_S48_4B, MSM5205_S48_4B},		//Sample Mode
+	{0,0},
 	{100,75}								//Volume
 };
 /* MSM6585 ADPCM CHIP INTERFACE */
-static struct MSM5205interface SPINB_msm6585Int = {
+static struct MSM5205interface SPINB_msm6585Int = { // Jolly Park, Verne's World
 	2,										//# of chips
 	640000,									//640Khz Clock Frequency
 	{SPINB_S1_msmIrq, SPINB_S2_msmIrq},		//VCLK Int. Callback
-	{MSM5205_S48_4B, MSM5205_S48_4B},		//Sample Mode
-	{100,75}								//Volume
-};
-/* MSM6585 ADPCM CHIP INTERFACE */
-static struct MSM5205interface SPINB_msm6585Int2 = {
-	2,										//# of chips
-	720000,									//720Khz Clock Frequency
-	{SPINB_S1_msmIrq, SPINB_S2_msmIrq},		//VCLK Int. Callback
-	{MSM5205_S48_4B, MSM5205_S48_4B},		//Sample Mode
+	{MSM6585_S40_4B, MSM6585_S40_4B},		//Sample Mode // 16KHz 4-bit
+	{1,1},
 	{100,75}								//Volume
 };
 /* Sound board */
@@ -685,10 +679,10 @@ READ_HANDLER(snd1_portc_r) {
 SND CPU #1 8255 PPI
 -------------------
   Port A:
-  (out) Address 8-15 for DATA ROM		(manual showes this as Port B incorrectly!)
+  (out) Address 8-15 for DATA ROM		(manual shows this as Port B incorrectly!)
 
   Port B:
-  (out) Address 0-7 for DATA ROM		(manual showes this as Port A incorrectly!)
+  (out) Address 0-7 for DATA ROM		(manual shows this as Port A incorrectly!)
 
   Port C:
   (out)
@@ -726,10 +720,10 @@ WRITE_HANDLER(snd1_portc_w)
 SND CPU #2 8255 PPI
 -------------------
   Port A:
-  (out) Address 8-15 for DATA ROM		(manual showes this as Port B incorrectly!)
+  (out) Address 8-15 for DATA ROM		(manual shows this as Port B incorrectly!)
 
   Port B:
-  (out) Address 0-7 for DATA ROM		(manual showes this as Port A incorrectly!)
+  (out) Address 0-7 for DATA ROM		(manual shows this as Port A incorrectly!)
 
   Port C:
   (out)
@@ -1312,11 +1306,11 @@ static MACHINE_DRIVER_START(spinbdmd)
 MACHINE_DRIVER_END
 
 /* SOUND SECTION DRIVER */
-static MACHINE_DRIVER_START(spinbs5205)
-  MDRV_CPU_ADD(Z80, 6000000)		//Schem shows 5 or 6/2 = 2.5/3Mhz, but sound is distorted otherwise
+static MACHINE_DRIVER_START(spinbs5205) // Bushido, Mach2
+  MDRV_CPU_ADD(Z80, 5000000)		// Schem shows 5/2 = 2.5Mhz, Bushido works with 2.5MHz, Mach2 has some stuttering then
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(spinbsnd1_readmem, spinbsnd1_writemem)
-  MDRV_CPU_ADD(Z80, 6000000)		//Schem shows 6/2 = 2.5/3Mhz, but sound is distorted otherwise
+  MDRV_CPU_ADD(Z80, 5000000)		// Schem shows 5/2 = 2.5Mhz, Bushido works with 2.5MHz, Mach2 has some stuttering then
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(spinbsnd2_readmem, spinbsnd2_writemem)
   MDRV_INTERLEAVE(50)
@@ -1324,11 +1318,11 @@ static MACHINE_DRIVER_START(spinbs5205)
 MACHINE_DRIVER_END
 
 /* SOUND SECTION DRIVER */
-static MACHINE_DRIVER_START(spinbs6585)
-  MDRV_CPU_ADD(Z80, 6000000)		//Schem shows 5 or 6/2 = 2.5/3Mhz, but sound is distorted otherwise
+static MACHINE_DRIVER_START(spinbs6585) // Jolly Park
+  MDRV_CPU_ADD(Z80, 5000000)		// Schem shows 5/2 = 2.5Mhz, but sound distorted then
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(spinbsnd1_readmem, spinbsnd1_writemem)
-  MDRV_CPU_ADD(Z80, 6000000)		//Schem shows 6/2 = 2.5/3Mhz, but sound is distorted otherwise
+  MDRV_CPU_ADD(Z80, 5000000)		// Schem shows 5/2 = 2.5Mhz, but sound distorted then
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(spinbsnd2_readmem, spinbsnd2_writemem)
   MDRV_INTERLEAVE(50)
@@ -1347,7 +1341,7 @@ MACHINE_DRIVER_START(spinb)
   MDRV_SWITCH_CONV(spinb_sw2m,spinb_m2sw)
 MACHINE_DRIVER_END
 
-//Main CPU without NMI, DMD, Sound hardware Driver
+//Main CPU without NMI, DMD, Sound hardware Driver (Bushido, Mach2)
 MACHINE_DRIVER_START(spinbs1)
   MDRV_IMPORT_FROM(spinb)
   MDRV_IMPORT_FROM(spinbdmd)
@@ -1356,7 +1350,7 @@ MACHINE_DRIVER_START(spinbs1)
   MDRV_SOUND_CMDHEADING("spinb")
 MACHINE_DRIVER_END
 
-//Main CPU with NMI, DMD, Sound hardware Driver
+//Main CPU with NMI, DMD, Sound hardware Driver (Jolly Park)
 MACHINE_DRIVER_START(spinbs1n)
   MDRV_IMPORT_FROM(spinb)
   MDRV_CPU_MODIFY("mcpu")
@@ -1368,7 +1362,7 @@ MACHINE_DRIVER_START(spinbs1n)
   MDRV_SOUND_CMDHEADING("spinb")
 MACHINE_DRIVER_END
 
-//Main CPU with NMI, DMD, Sound hardware Driver, extended DMD memory
+//Main CPU with NMI, DMD, Sound hardware Driver, extended DMD memory (Verne's World)
 MACHINE_DRIVER_START(spinbs1n2)
   MDRV_IMPORT_FROM(spinb)
   MDRV_CPU_MODIFY("mcpu")
@@ -1376,14 +1370,14 @@ MACHINE_DRIVER_START(spinbs1n2)
   MDRV_CPU_MEMORY(spinb_readmem2, spinb_writemem2)
   MDRV_CPU_PERIODIC_INT(spinb_z80nmi, SPINB_NMIFREQ)
   MDRV_IMPORT_FROM(spinbdmd)
-  MDRV_CPU_ADD(Z80, 6000000)		//Schem shows 5 or 6/2 = 2.5/3Mhz, but sound is distorted otherwise
+  MDRV_CPU_ADD(Z80, 5000000)		// Schem shows 5/2 = 2.5Mhz, but sound distorted then
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(spinbsnd1_readmem, spinbsnd1_writemem)
-  MDRV_CPU_ADD(Z80, 6000000)		//Schem shows 6/2 = 2.5/3Mhz, but sound is distorted otherwise
+  MDRV_CPU_ADD(Z80, 5000000)		// Schem shows 5/2 = 2.5Mhz, but sound distorted then
   MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
   MDRV_CPU_MEMORY(spinbsnd2_readmem, spinbsnd2_writemem)
   MDRV_INTERLEAVE(50)
-  MDRV_SOUND_ADD(MSM5205, SPINB_msm6585Int2)
+  MDRV_SOUND_ADD(MSM5205, SPINB_msm6585Int)
   MDRV_SOUND_CMD(spinb_sndCmd_w)
   MDRV_SOUND_CMDHEADING("spinb")
 MACHINE_DRIVER_END
@@ -1399,6 +1393,7 @@ static struct MSM5205interface gunshot_msm6585Int = {
   384000,
   {SPINB_S1_msmIrq},
   {MSM5205_S48_4B},
+  {0},
   {50}
 };
 MACHINE_DRIVER_START(gunshot)
