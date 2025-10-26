@@ -648,7 +648,7 @@ static const INT8 lfo_pm_table[8*8*2] = {
 
 
 /* lock level of common table */
-static int num_lock = 0;
+static volatile int num_lock = 0;
 
 
 #define SLOT7_1 (&OPL->P_CH[7].SLOT[SLOT1])
@@ -810,7 +810,7 @@ INLINE void advance(FM_OPL *OPL)
 				{
 					op->volume += eg_inc[op->eg_sel_dr + ((OPL->eg_cnt>>op->eg_sh_dr)&7)];
 
-					if ( op->volume >= op->sl )
+					if ( op->volume >= (INT32)op->sl )
 						op->state = EG_SUS;
 
 				}
@@ -1184,7 +1184,7 @@ INLINE void OPL_CALC_RH( FM_OPL *OPL, OPL_CH *CH, unsigned int noise )
 
 
 /* generic table initialize */
-static int init_tables(void)
+static void init_tables(void)
 {
 	signed int i,x;
 	signed int n;
@@ -1282,8 +1282,6 @@ static int init_tables(void)
 #ifdef SAVE_SAMPLE
 	sample[0]=fopen("sampsum.pcm","wb");
 #endif
-
-	return 1;
 }
 
 static void OPLCloseTable( void )
@@ -1791,11 +1789,7 @@ static int OPL_LockTable(void)
 	/* first time */
 
 	/* allocate total level table (128kb space) */
-	if( !init_tables() )
-	{
-		num_lock--;
-		return -1;
-	}
+	init_tables();
 
 	if (LOG_CYM_FILE)
 	{
