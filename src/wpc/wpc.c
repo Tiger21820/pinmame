@@ -125,6 +125,8 @@ static struct {
   int pageMask;           /* page handling */
   UINT8 diagnosticLed;
   int zc;                 /* zero cross flag */
+  int phase;
+  double lastACZeroCrossTimeStamp; /* Last time AC did cross 0 (120Hz) */
   double gi_on_time[WPC_N_GI]; /* Global time when GI Triac was turned on */
   volatile UINT8 conductingGITriacs; /* Current conducting triacs of WPC GI strings (triacs conduct if pulsed, then continue to conduct until current is near 0, that it to say at zero cross) */
   volatile UINT8 conductingChaseLightTriacs; /* Current conducting triacs of CFTBL Chase light GI strings (triacs conduct if pulsed, then continue to conduct until current is near 0, that it to say at zero cross) */
@@ -189,6 +191,8 @@ int wpc_m2sw(int col, int row) { return col*10+row+1; }
 
 // Zero Cross: a voltage comparator triggers when +5V AC reaches +5V or -5V, so at 120Hz in US (would be 100Hz in Europe), leading to around ~8.3ms period
 static void wpc_zc(int data) {
+   wpclocals.phase = 1 - wpclocals.phase;
+
    // Set Zero Cross flag (it's reset when read)
    wpclocals.zc = 1;
 
@@ -200,7 +204,7 @@ static void wpc_zc(int data) {
    // Since zero cross and IRQ are not perfectly aligned, there can be either 8 or 9 irq per zero cross period in 60Hz countries (~1ms / ~8.3ms, this would be 9 or 10 in 50Hz countries ~1ms / ~10ms).
    // The resulting GI level is the ratio of on/off pulse of the PWM cycle computed using MAME global time
    double zc_time = timer_get_time();
-   if (zc_time > coreGlobals.lastACZeroCrossTimeStamp)
+   if (zc_time > wpclocals.lastACZeroCrossTimeStamp)
    {
       for (int ii = 0, tmp= wpclocals.conductingGITriacs; ii < 5; ii++, tmp >>= 1) {
          if (wpclocals.gi_on_time[ii] >= zc_time)
@@ -208,7 +212,7 @@ static void wpc_zc(int data) {
             coreGlobals.gi[ii] = 0;
          else
             // The initial implementation would return values between 0 and 8, so we keep this scaling for backward compatibility
-            coreGlobals.gi[ii] = (int)(0.5 + 8.0 * (1.0 - (wpclocals.gi_on_time[ii] - coreGlobals.lastACZeroCrossTimeStamp) / (zc_time - coreGlobals.lastACZeroCrossTimeStamp)));
+            coreGlobals.gi[ii] = (int)(0.5 + 8.0 * (1.0 - (wpclocals.gi_on_time[ii] - wpclocals.lastACZeroCrossTimeStamp) / (zc_time - wpclocals.lastACZeroCrossTimeStamp)));
          // If bit is still set, ASIC GI output Txx is continuously high and Triac continuously conduct (for the complete AC period), otherwise we set it's turn on time far after the next zero cross.
          wpclocals.gi_on_time[ii] = tmp & 0x01 ? zc_time : zc_time + 100.0;
       }
@@ -220,8 +224,10 @@ static void wpc_zc(int data) {
       #endif
    }
 
-   // Synchronize core PWM integration AC signal
-   core_zero_cross();
+   // Synchronize core PWM integration AC signal (keeping the phase right to avoid breaking AC integration)
+   if (wpclocals.phase)
+      core_zero_cross();
+   wpclocals.lastACZeroCrossTimeStamp = timer_get_time();
 
    // More precise implementation with better physic emulation
    if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_GI | CORE_MODOUT_FORCE_ON))
@@ -1266,8 +1272,8 @@ static MACHINE_INIT(wpc) {
   core_set_pwm_output_type(CORE_MODOUT_GI0, coreGlobals.nGI, CORE_MODOUT_BULB_44_6_3V_AC);
   if (core_gameData->gen & (GEN_WPCALPHA_1 | GEN_WPCALPHA_2)) { // BOP, FH, HD alpahanumeric segments
     coreGlobals.nAlphaSegs = 40 * 16;
-    core_set_pwm_output_type(CORE_MODOUT_SEG0, 16 * 16, CORE_MODOUT_VFD_STROBE_1_16MS);
-    core_set_pwm_output_type(CORE_MODOUT_SEG0 + 20*16, 16 * 16, CORE_MODOUT_VFD_STROBE_1_16MS);
+    core_set_pwm_output_led_vfd(CORE_MODOUT_SEG0, 16 * 16, 1, 16.f / 1.f);
+    core_set_pwm_output_led_vfd(CORE_MODOUT_SEG0 + 20 * 16, 16 * 16, 1, 16.f / 1.f);
   }
   const struct GameDriver* rootDrv = Machine->gamedrv;
   while (rootDrv->clone_of && (rootDrv->clone_of->flags & NOT_A_DRIVER) == 0)
@@ -1528,7 +1534,7 @@ static MACHINE_INIT(wpc) {
   // Reset GI dimming timers
   core_zero_cross();
   for (int ii = 0,tmp= wpc_data[WPC_GILAMPS]; ii < 5; ii++, tmp >>= 1) {
-     wpclocals.gi_on_time[ii] = coreGlobals.lastACZeroCrossTimeStamp + (tmp & 0x01 ? 0. : 100.);
+     wpclocals.gi_on_time[ii] = wpclocals.lastACZeroCrossTimeStamp + (tmp & 0x01 ? 0. : 100.);
   }
 
   wpclocals.pageMask = romLengthMask[((romLength>>17)-1)&0x07];

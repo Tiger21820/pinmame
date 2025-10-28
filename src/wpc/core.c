@@ -2482,25 +2482,38 @@ void core_update_pwm_output_bulb(const double now, const int index, const int is
   const float U = (state ^ output->state.bulb.isReversed) ? output->state.bulb.U : 0.f;
   const float dt_diff = (float)(output->state.bulb.integrationTimestamp - output->state.bulb.prevIntegrationTimestamp);
 
-  if(U != output->state.bulb.prevIntegrationValue        // state flip?
-     || dt_diff >= (float)(BULB_INTEGRATION_PERIOD*20.)) // or we waited long enough to get a stable discrete integration
-  {
-    // do the integration in a loop of small steps, roughly in BULB_INTEGRATION_PERIOD sized steps (but rounded up/down to have same sized cycles in here)
-    float countf = floorf(dt_diff*(float)(1./BULB_INTEGRATION_PERIOD) + 0.5f);
-    if(countf < 1.f) // single cycle/short pulses need to use the 'original' cycle time as a workaround
+  float countf;
+  if (U != output->state.bulb.prevIntegrationValue) {
+    // state flip? do not delay integration but do the integration in a loop of small steps, roughly in BULB_INTEGRATION_PERIOD sized steps (but rounded up/down to have same sized cycles in here)
+    countf = floorf(dt_diff * (float)(1. / BULB_INTEGRATION_PERIOD));
+    // ensure that we always perform the integration, evzentually with a single scaled period
+    if (countf < 1.f)
       countf = 1.f;
+  }
+  else if (dt_diff >= (float)(4.0 * BULB_INTEGRATION_PERIOD)) {
+    // We waited long enough to perform at least one full integration step, just perform integration up to last step before now
+    // This improves the fading behavior, as it allows to get a consistant state of all bulbs when the client application wants it to be rasterized
+    // We still always keep at least a few integration periods, to better weight the previous situation (adjusted period on state flip) but not too much as it would lead to visual artefacts.
+    countf = floorf(dt_diff * (float)(1. / BULB_INTEGRATION_PERIOD));
+  }
+  else {
+    // No state flip and not enough time elapsed ? just delay integration
+    countf = 0;
+  }
+
+  if (countf > 0.f)
+  {
     const int count = (int)countf;
     const float dt = dt_diff/countf;
     for(int i = 0; i < count; ++i) {
       // Keeps T within the range of the LUT (between room temperature and melt down point)
       output->state.bulb.filament_temperature = output->state.bulb.filament_temperature < 293.0f ? 293.0f : output->state.bulb.filament_temperature > (float) BULB_T_MAX ? (float) BULB_T_MAX : output->state.bulb.filament_temperature;
       float Ut;
-      switch (output->state.bulb.isAC)
-      {
+      switch (output->state.bulb.isAC) {
       case 0: Ut = output->state.bulb.prevIntegrationValue; break;
-      case 1: Ut =  1.41421356f *           sinf((float)(60.0 * 2.0 * PI) * (float)(output->state.bulb.prevIntegrationTimestamp - coreGlobals.lastACZeroCrossTimeStamp))  * output->state.bulb.prevIntegrationValue; break;
-      case 2: Ut =  1.41421356f * max(0.f,  sinf((float)(60.0 * 2.0 * PI) * (float)(output->state.bulb.prevIntegrationTimestamp - coreGlobals.lastACZeroCrossTimeStamp))) * output->state.bulb.prevIntegrationValue; break;
-      case 3: Ut = -1.41421356f * max(0.f, -sinf((float)(60.0 * 2.0 * PI) * (float)(output->state.bulb.prevIntegrationTimestamp - coreGlobals.lastACZeroCrossTimeStamp))) * output->state.bulb.prevIntegrationValue; break;
+      case 1: Ut = 1.41421356f *          sinf((float)(60.0 * 2.0 * PI) * (float)(output->state.bulb.prevIntegrationTimestamp - coreGlobals.lastACPositiveZeroCrossTimeStamp))  * output->state.bulb.prevIntegrationValue; break;
+      case 2: Ut = 1.41421356f * max(0.f, sinf((float)(60.0 * 2.0 * PI) * (float)(output->state.bulb.prevIntegrationTimestamp - coreGlobals.lastACPositiveZeroCrossTimeStamp))) * output->state.bulb.prevIntegrationValue; break;
+      case 3: Ut = 1.41421356f * min(0.f, sinf((float)(60.0 * 2.0 * PI) * (float)(output->state.bulb.prevIntegrationTimestamp - coreGlobals.lastACPositiveZeroCrossTimeStamp))) * output->state.bulb.prevIntegrationValue; break;
       default: assert(FALSE); Ut = 0.f; break;
       }
       const float dT = dt * bulb_heat_up_factor(output->state.bulb.bulb, output->state.bulb.filament_temperature, Ut, output->state.bulb.serial_R);
@@ -2679,17 +2692,17 @@ void core_set_pwm_output_type(int startIndex, int count, int type)
       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 1.f;
       coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_bulb;
       break;
-    case CORE_MODOUT_BULB_44_20V_AC_POS_BY: // Strobed bulb, 20V AC switched through a SCR and a diode limiting to positive half of the AC sine (Bally 6803)
+    case CORE_MODOUT_BULB_44_20V_AC_POS_BY: // Strobed bulb, 20.5V AC switched through a SCR and a diode limiting to positive half of the AC sine (Bally 6803)
       coreGlobals.physicOutputState[i].state.bulb.bulb = BULB_44;
-      coreGlobals.physicOutputState[i].state.bulb.U = 20.f - 0.7f - 0.7f;
+      coreGlobals.physicOutputState[i].state.bulb.U = 20.5f - 0.7f - 0.7f;
       coreGlobals.physicOutputState[i].state.bulb.isAC = 2;
       coreGlobals.physicOutputState[i].state.bulb.serial_R = 0.f;
       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 1.f;
       coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_bulb;
       break;
-    case CORE_MODOUT_BULB_44_20V_AC_NEG_BY: // Strobed bulb, 20V AC switched through a SCR and a diode limiting to negative half of the AC sine (Bally 6803)
+    case CORE_MODOUT_BULB_44_20V_AC_NEG_BY: // Strobed bulb, 20.5V AC switched through a SCR and a diode limiting to negative half of the AC sine (Bally 6803)
       coreGlobals.physicOutputState[i].state.bulb.bulb = BULB_44;
-      coreGlobals.physicOutputState[i].state.bulb.U = 20.f - 0.7f - 0.7f;
+      coreGlobals.physicOutputState[i].state.bulb.U = 20.5f - 0.7f - 0.7f;
       coreGlobals.physicOutputState[i].state.bulb.isAC = 3;
       coreGlobals.physicOutputState[i].state.bulb.serial_R = 0.f;
       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 1.f;
@@ -2724,6 +2737,22 @@ void core_set_pwm_output_type(int startIndex, int count, int type)
       coreGlobals.physicOutputState[i].state.bulb.U = 25.f - 1.0f - 1.0f;
       coreGlobals.physicOutputState[i].state.bulb.isAC = 0;
       coreGlobals.physicOutputState[i].state.bulb.serial_R = 1.5f;
+      coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 1.f;
+      coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_bulb;
+      break;
+    case CORE_MODOUT_BULB_89_48V_AC_POS_BY: // Strobed bulb, 48V AC switched through a SCR and a diode limiting to positive half of the AC sine (Bally 6803)
+      coreGlobals.physicOutputState[i].state.bulb.bulb = BULB_89;
+      coreGlobals.physicOutputState[i].state.bulb.U = 48.f - 0.7f - 0.7f;
+      coreGlobals.physicOutputState[i].state.bulb.isAC = 2;
+      coreGlobals.physicOutputState[i].state.bulb.serial_R = 0.f;
+      coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 1.f;
+      coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_bulb;
+      break;
+    case CORE_MODOUT_BULB_89_48V_AC_NEG_BY: // Strobed bulb, 48V AC switched through a SCR and a diode limiting to negative half of the AC sine (Bally 6803)
+      coreGlobals.physicOutputState[i].state.bulb.bulb = BULB_89;
+      coreGlobals.physicOutputState[i].state.bulb.U = 48.f - 0.7f - 0.7f;
+      coreGlobals.physicOutputState[i].state.bulb.isAC = 3;
+      coreGlobals.physicOutputState[i].state.bulb.serial_R = 0.f;
       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 1.f;
       coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_bulb;
       break;
@@ -2767,22 +2796,6 @@ void core_set_pwm_output_type(int startIndex, int count, int type)
       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 10.f / 1.f;
       coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_led;
       break;
-    case CORE_MODOUT_LED_STROBE_1_5MS:
-       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 5.f / 1.f;
-       coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_led;
-       break;
-    case CORE_MODOUT_LED_STROBE_8_16MS:
-       coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 16.f / 8.f;
-       coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_led;
-       break;
-    case CORE_MODOUT_VFD_STROBE_05_20MS:
-      coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 20.f / 0.5f;
-      coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_led;
-      break;
-    case CORE_MODOUT_VFD_STROBE_1_16MS:
-      coreGlobals.physicOutputState[i].state.bulb.relative_brightness = 16.f / 1.f;
-      coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_led;
-      break;
     default: // Unimplemented integrator
       logerror("Unsupported physical output #%d of type %d\n", i, type);
       assert(FALSE);
@@ -2802,6 +2815,16 @@ void core_set_pwm_output_bulb(int startIndex, int count, int bulb, float U, int 
     coreGlobals.physicOutputState[i].state.bulb.serial_R = serial_R;
     coreGlobals.physicOutputState[i].state.bulb.relative_brightness = relative_brightness;
     coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_bulb;
+  }
+}
+
+void core_set_pwm_output_led_vfd(int startIndex, int count, int isVFD, float relative_brightness) {
+  for (int i = startIndex; i < startIndex + count; i++) {
+    memset(&(coreGlobals.physicOutputState[i]), 0, sizeof(core_tPhysicOutput));
+    coreGlobals.physicOutputState[i].flipBufferPos = (coreGlobals.binaryOutputState[i >> 3] >> (i & 7)) & 1;
+    coreGlobals.physicOutputState[i].type = CORE_MODOUT_CUSTOM_INTEGRATOR;
+    coreGlobals.physicOutputState[i].state.bulb.relative_brightness = relative_brightness;
+    coreGlobals.physicOutputState[i].integrator = &core_update_pwm_output_led;
   }
 }
 
