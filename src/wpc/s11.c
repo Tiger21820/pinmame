@@ -610,7 +610,7 @@ static WRITE_HANDLER(pia0cb2_w) {
   locals.ssEn = !data;
   coreGlobals.pulsedSolState = (coreGlobals.pulsedSolState & ~(1 << (S11_GAMEONSOL - 1))) | (data ? 0 : (1 << (S11_GAMEONSOL - 1)));
   core_write_pwm_output(CORE_MODOUT_SOL0 + S11_GAMEONSOL - 1, 1, locals.ssEn ? 1 : 0);
-  core_write_pwm_output(CORE_MODOUT_SOL0 + CORE_FIRSTSSSOL, 6, locals.ssEn ? locals.switchedSol : 0);
+  core_write_pwm_output(CORE_MODOUT_SOL0 + CORE_FIRSTSSSOL - 1, 6, locals.ssEn ? locals.switchedSol : 0);
 }
 
 static WRITE_HANDLER(pia1ca2_w) { setSSSol(data, 0); }
@@ -1184,7 +1184,7 @@ static MACHINE_INIT(s11) {
   }
 
   // DataEast/Sega 3
-  else if ((strncasecmp(gn, "gnr_",  4) == 0) // Guns'n Roses
+  else if ((strncasecmp(gn, "gnr_",  4) == 0) // Guns n' Roses
         || (strncasecmp(gn, "tftc_", 5) == 0) // Tales from The Crypt
         || (strncasecmp(gn, "stwr_", 5) == 0) // Star Wars
         || (strncasecmp(gn, "jupk_", 5) == 0) // Jurassic Park
