@@ -42,6 +42,8 @@ static PinmameConfig* _p_Config = nullptr;
 static std::thread* _p_gameThread = nullptr;
 static void* _p_userData = nullptr;
 
+static char _aliasFromFile[50];
+
 static int _mechInit[MECH_MAXMECH];
 static PinmameMechInfo _mechInfo[MECH_MAXMECH];
 
@@ -182,15 +184,55 @@ char* ComposePath(const char* const path, const char* const file)
 }
 
 /******************************************************
+ * CheckGameAlias
+ ******************************************************/
+
+const char* CheckGameAlias(const char* const romName)
+{
+	if (!_p_Config || !_p_Config->vpmPath[0])
+		return romName;
+
+	char aliasPath[PINMAME_MAX_PATH];
+	strcpy(aliasPath, _p_Config->vpmPath);
+	const size_t len = strlen(_p_Config->vpmPath);
+	if (len > 0 && aliasPath[len - 1] != '/' && aliasPath[len - 1] != '\\')
+		strcat(aliasPath, "/");
+	strcat(aliasPath, "alias.txt");
+
+	FILE* file = fopen(aliasPath, "r");
+
+	if (file != NULL) {
+		char line[128];
+		while (fgets(line, sizeof(line), file)) {
+			// Skip lines that start with "#"
+			if (line[0] == '#')
+				continue;
+
+			char* token = strtok(line, ", ");
+
+			if (!strcasecmp(token, romName))
+			{
+				strcpy(_aliasFromFile,  strtok(NULL, " ,\n#;'"));
+				fclose(file);
+				return _aliasFromFile;
+			}
+		}
+		fclose(file);
+	}
+	return romName;
+}
+
+/******************************************************
  * GetGameNumFromString
  ******************************************************/
 
 int GetGameNumFromString(const char* const name)
 {
 	int gameNum = 0;
+	const char* gameName = CheckGameAlias(name);
 
 	while (drivers[gameNum]) {
-		if (!strcasecmp(drivers[gameNum]->name, name))
+		if (!strcasecmp(drivers[gameNum]->name, gameName))
 			break;
 		gameNum++;
 	}
@@ -428,81 +470,31 @@ extern "C" int libpinmame_time_to_quit(void)
  * libpinmame_update_display
  ******************************************************/
 
-extern "C" void libpinmame_update_display(const int index, const struct core_dispLayout* p_layout, void* p_data)
+extern "C" int libpinmame_needs_update_display() { return _p_Config->cb_OnDisplayUpdated != nullptr; }
+
+extern "C" void libpinmame_update_display(const int index, void* p_data)
 {
-	PinmameDisplay* pDisplay = nullptr;
+	if (!_p_Config->cb_OnDisplayUpdated)
+		return;
 
-	if (_displays.size() < index + 1) {
-		pDisplay = new PinmameDisplay();
-		memset(pDisplay, 0, sizeof(PinmameDisplay));
-
-		pDisplay->layout.type = (PINMAME_DISPLAY_TYPE)p_layout->type;
-		pDisplay->layout.top = p_layout->top;
-		pDisplay->layout.left = p_layout->left;
-
-		if (p_layout->type == CORE_VIDEO) {
-			pDisplay->layout.width = p_layout->length;
-			pDisplay->layout.height = p_layout->start;
-
-			pDisplay->layout.depth = 24;
-
-			pDisplay->size = pDisplay->layout.width * pDisplay->layout.height * 3;
-		}
-		else if ((p_layout->type & CORE_DMD) == CORE_DMD) {
-			pDisplay->layout.width = p_layout->length;
-			pDisplay->layout.height = p_layout->start;
-
-			if (p_layout->type & CORE_DMDSEG)
-				pDisplay->layout.depth = 2;
-			else {
-				const int shade_16_enabled = (core_gameData->gen & (GEN_SAM|GEN_SPA|GEN_ALVG|GEN_ALVG_DMD2|GEN_GTS3)) != 0;
-				pDisplay->layout.depth = shade_16_enabled ? 4 : 2;
-			}
-
-			pDisplay->size = pDisplay->layout.width * pDisplay->layout.height;
-		}
-		else {
-			pDisplay->layout.length = p_layout->length;
-
-			pDisplay->size = pDisplay->layout.length * sizeof(UINT16);
-		}
-
-		pDisplay->pData = malloc(pDisplay->size);
-		memset(pDisplay->pData, 0, pDisplay->size);
-
-		_displays.push_back(pDisplay);
-
-		if (!_p_Config->cb_OnDisplayAvailable)
-			return;
-
-		const int displayCount = GetDisplayCount();
-		(*(_p_Config->cb_OnDisplayAvailable))(index, displayCount, &pDisplay->layout, _p_userData);
-	}
-	else {
-		if (!_p_Config->cb_OnDisplayUpdated)
-			return;
-
-		pDisplay = _displays[index];
-
-		if (p_data == nullptr) {
+	PinmameDisplay* pDisplay = _displays[index];
+	if (pDisplay->layout.type == CORE_VIDEO) {
+		if (UpdatePinmameDisplayBitmap(pDisplay, (mame_bitmap*)p_data))
+			(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
+		else
 			(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
-			return;
+	}
+	else if ((pDisplay->layout.type & CORE_SEGALL) == CORE_DMD) {
+		if (memcmp(pDisplay->pData, p_data, pDisplay->size)) {
+			memcpy(pDisplay->pData, p_data, pDisplay->size);
+			(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
 		}
-
-		if (pDisplay->layout.type == CORE_VIDEO) {
-			if (UpdatePinmameDisplayBitmap(pDisplay, (mame_bitmap*)p_data))
-				(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
-			else
-				(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
-		}
-		else {
-			if (memcmp(pDisplay->pData, p_data, pDisplay->size)) {
-				memcpy(pDisplay->pData, p_data, pDisplay->size);
-				(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
-			}
-			else
-				(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
-		}
+		else
+			(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
+	}
+	else
+	{
+		(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
 	}
 }
 
@@ -538,10 +530,78 @@ extern "C" void OnStateChange(const int state)
 {
 	_isRunning = state;
 
-	if (!_p_Config->cb_OnStateUpdated)
-		return;
+	if (_p_Config->cb_OnStateUpdated)
+		(*(_p_Config->cb_OnStateUpdated))(state, _p_userData);
 
-	(*(_p_Config->cb_OnStateUpdated))(state, _p_userData);
+	if (state == 1)
+	{
+		bool hasDMDOrVideo = false;
+		const int displayCount = GetDisplayCount();
+		const struct core_dispLayout* layout = core_gameData->lcdLayout;
+		const struct core_dispLayout* parent_layout = NULL;
+		for (; layout->length || (parent_layout && parent_layout->length); layout += 1) {
+			if (layout->length == 0) { // Recursive import
+				layout = parent_layout;
+				parent_layout = NULL;
+			}
+			if (layout->type == CORE_IMPORT) {
+				assert(parent_layout == NULL); // IMPORT of IMPORT is not currently supported as it is not used by any driver so far
+				parent_layout = layout + 1;
+				layout = layout->lptr - 1;
+				continue;
+			}
+
+			PinmameDisplay* pDisplay = new PinmameDisplay();
+			memset(pDisplay, 0, sizeof(PinmameDisplay));
+			pDisplay->layout.type = (PINMAME_DISPLAY_TYPE)layout->type;
+			pDisplay->layout.top = layout->top;
+			pDisplay->layout.left = layout->left;
+			if (layout->type == CORE_VIDEO) {
+				pDisplay->layout.width = layout->length;
+				pDisplay->layout.height = layout->start;
+				pDisplay->layout.depth = 24;
+				pDisplay->size = pDisplay->layout.width * pDisplay->layout.height * 3;
+				hasDMDOrVideo = true;
+			}
+			else if ((layout->type & CORE_DMD) == CORE_DMD) {
+				pDisplay->layout.width = layout->length;
+				pDisplay->layout.height = layout->start;
+				const int shade_16_enabled = (core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG | GEN_ALVG_DMD2 | GEN_GTS3)) != 0;
+				pDisplay->layout.depth = shade_16_enabled ? 4 : 2;
+				pDisplay->size = pDisplay->layout.width * pDisplay->layout.height;
+				hasDMDOrVideo = true;
+			}
+			else {
+				pDisplay->layout.length = layout->length;
+				pDisplay->size = pDisplay->layout.length * sizeof(UINT16);
+			}
+			pDisplay->pData = malloc(pDisplay->size);
+			memset(pDisplay->pData, 0, pDisplay->size);
+
+			_displays.push_back(pDisplay);
+
+			if (_p_Config->cb_OnDisplayAvailable)
+				(*(_p_Config->cb_OnDisplayAvailable))((int)(_displays.size() - 1), displayCount, &pDisplay->layout, _p_userData);
+		}
+		// Additional DMD generated from segment data
+		if (!hasDMDOrVideo)
+		{
+			PinmameDisplay* pDisplay = new PinmameDisplay();
+			memset(pDisplay, 0, sizeof(PinmameDisplay));
+			pDisplay->layout.type = (PINMAME_DISPLAY_TYPE)(PINMAME_DISPLAY_TYPE_DMD | PINMAME_DISPLAY_TYPE_DMDSEG);
+			pDisplay->layout.top = 0;
+			pDisplay->layout.left = 0;
+			pDisplay->layout.width = 128;
+			pDisplay->layout.height = 32;
+			pDisplay->layout.depth = 2;
+			pDisplay->size = pDisplay->layout.width * pDisplay->layout.height;
+			pDisplay->pData = malloc(pDisplay->size);
+			memset(pDisplay->pData, 0, pDisplay->size);
+			_displays.push_back(pDisplay);
+			if (_p_Config->cb_OnDisplayAvailable)
+				(*(_p_Config->cb_OnDisplayAvailable))((int)(_displays.size() - 1), displayCount, &pDisplay->layout, _p_userData);
+		}
+	}
 }
 
 /******************************************************
