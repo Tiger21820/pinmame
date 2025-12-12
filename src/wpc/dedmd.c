@@ -19,12 +19,11 @@
 static struct {
   struct sndbrdData brdData;
   int cmd, ncmd, busy, status, ctrl, bank;
-  core_tDMDPWMState pwm_state;
-  
+
   // dmd32 stuff
   UINT8* RAM;
   UINT8* RAMbankPtr;
-  
+
   // dmd16 stuff
   UINT8 framedata[2][16][2][8]; // 2 PWM frames of 16 rows of 128 bits
   UINT32 row_latch, last_row_latch;
@@ -93,7 +92,7 @@ static READ_HANDLER(dmd32_io_r) {
   case 0:
     // Invalid operation: reading from address register is unsupported (see datasheet)
     // Strangely enough, all CRTC write sequences are followed by a read of CRTC register which the datasheet state as unsupported
-	 //LOG(("%8.5f DEDMD32 PC %04x: Invalid read at 0x%04x\n", timer_get_time(), activecpu_get_pc(), offset + 0x3000));
+    //LOG(("%8.5f DEDMD32 PC %04x: Invalid read at 0x%04x\n", timer_get_time(), activecpu_get_pc(), offset + 0x3000));
     break;
   case 1:
     return crtc6845_register_0_r(0);
@@ -151,11 +150,11 @@ static WRITE_HANDLER(dmd32_ctrl_w) {
     CA7      - MA8      => DMD row highest bit [always starts at 0, unimplemented in PinMame]
     RA0      - MA9      => used to toggle between PWM frame while rasterizing each row
     CA8..9   - MA10..11
-	ZA0      - MA12     => RAM bank (decoded by U16)
-	XA6..7   - MA13..14 => RAM bank (decoded by U16)
+    ZA0      - MA12     => RAM bank (decoded by U16)
+    XA6..7   - MA13..14 => RAM bank (decoded by U16)
  - RA0 is also wired to ROWCLOCK, therefore row is advanced once every 2 rasterized rows
  - The start address is usually either 0x2000 or 0x2100 (i.e. with CA13 set while it is not wire to RAM but to U2), with CURSOR always
-   being defined to 0x2000 / row 0, which led to guess that CURSOR signal is used to generate FIRQ (frame IRQ to CPU, trigerring
+   being defined to 0x2000 / row 0, which led to guess that CURSOR signal is used to generate FIRQ (frame IRQ to CPU, triggering
    some animation update). Results looks good but this would be nice to check this assumption on real hardware.
    */
 static void dmd32_vblank(int which) {
@@ -165,10 +164,37 @@ static void dmd32_vblank(int which) {
   assert((base & 0x00FF) == 0x0000); // As the mapping of lowest 8 bits is not implemented (would need complex data copy and does not seem to be used by any game)
   assert(crtc6845_rasterized_height_r(0) == 64); // As the implementation requires this to be always true
   unsigned int src = /*((base >> 3) & 0x000F) | ((base << 1) & 0x0100) |*/ ((base << 2) & 0x7C00);
-  core_dmd_submit_frame(&dmdlocals.pwm_state, dmdlocals.RAMbankPtr +  src,           2); // First frame has been displayed 2/3 of the time (500kHz row clock)
-  core_dmd_submit_frame(&dmdlocals.pwm_state, dmdlocals.RAMbankPtr + (src | 0x0200), 1); // Second frame has been displayed 1/3 of the time (1MHz row clock)
+  const core_tLCDLayout* layout = core_gameData->lcdLayout->importedLayout ? core_gameData->lcdLayout->importedLayout : core_gameData->lcdLayout;
+  core_dmd_submit_frame(layout, dmdlocals.RAMbankPtr +  src,           2); // First frame has been displayed 2/3 of the time (500kHz row clock)
+  core_dmd_submit_frame(layout, dmdlocals.RAMbankPtr + (src | 0x0200), 1); // Second frame has been displayed 1/3 of the time (1MHz row clock)
   if (crtc6845_cursor_address_r(0)) // Guessing that the CURSOR signal is used to generate FIRQ
     cpu_set_irq_line(dmdlocals.brdData.cpuNo, M6809_FIRQ_LINE, PULSE_LINE);
+
+  #ifdef PROC_SUPPORT
+    if (coreGlobals.p_rocEn) {
+    /* Whitestar games drive 4 colors using 2 subframes, which the P-ROC
+	    has 4 subframes for up to 16 colors. Experimentation has showed
+		 using P-ROC subframe 2 and 3 provides a pretty good color match. */
+	  const int procSubFrame0 = 2;
+	  const int procSubFrame1 = 3;
+
+	  /* Start with an empty frame buffer */
+	  procClearDMD();
+
+	  /* Fill the P-ROC subframes from the video RAM */
+	  const UINT8* RAM = ((UINT8*)dmdlocals.RAMbankPtr) + ((crtc6845_start_address_r(0) & 0x0100) << 2);
+	  procFillDMDSubFrame(procSubFrame0, RAM        , 0x200);
+	  procFillDMDSubFrame(procSubFrame1, RAM + 0x200, 0x200);
+
+	  /* Each byte is reversed in the video RAM relative to the bit order the P-ROC
+	     expects. So reverse each byte. */
+	  procReverseSubFrameBytes(procSubFrame0);
+	  procReverseSubFrameBytes(procSubFrame1);
+	  procUpdateDMD();
+	  /* Don't explicitly update the DMD from here. The P-ROC code
+	     will update after the next DMD event. */
+	}
+  #endif
 }
 
 static void dmd32_init(struct sndbrdData *brdData) {
@@ -195,42 +221,12 @@ static void dmd32_init(struct sndbrdData *brdData) {
     assert(0); // Unsupported board revision
 
   // Init PWM shading
-  core_dmd_pwm_init(&dmdlocals.pwm_state, 128, 32, CORE_DMD_PWM_FILTER_DE_128x32, CORE_DMD_PWM_COMBINER_SUM_2_1);
+  const core_tLCDLayout* layout = core_gameData->lcdLayout->importedLayout ? core_gameData->lcdLayout->importedLayout : core_gameData->lcdLayout;
+  core_dmd_pwm_init(layout, CORE_DMD_PWM_FILTER_DE_128x32, CORE_DMD_PWM_COMBINER_SUM_2_1, 0);
 }
 
 static void dmd32_exit(int boardNo) {
    free(dmdlocals.RAM);
-   core_dmd_pwm_exit(&dmdlocals.pwm_state);
-}
-
-PINMAME_VIDEO_UPDATE(dedmd32_update) {
-  #ifdef PROC_SUPPORT
-	if (coreGlobals.p_rocEn) {
-    /* Whitestar games drive 4 colors using 2 subframes, which the P-ROC
-	    has 4 subframes for up to 16 colors. Experimentation has showed
-		 using P-ROC subframe 2 and 3 provides a pretty good color match. */
-	  const int procSubFrame0 = 2;
-	  const int procSubFrame1 = 3;
-
-	  /* Start with an empty frame buffer */
-	  procClearDMD();
-
-	  /* Fill the P-ROC subframes from the video RAM */
-     const UINT8* RAM = ((UINT8*)dmdlocals.RAMbankPtr) + ((crtc6845_start_address_r(0) & 0x0100) << 2);
-     procFillDMDSubFrame(procSubFrame0, RAM        , 0x200);
-	  procFillDMDSubFrame(procSubFrame1, RAM + 0x200, 0x200);
-
-	  /* Each byte is reversed in the video RAM relative to the bit order the P-ROC
-	     expects. So reverse each byte. */
-	  procReverseSubFrameBytes(procSubFrame0);
-	  procReverseSubFrameBytes(procSubFrame1);
-	  procUpdateDMD();
-	  /* Don't explicitly update the DMD from here. The P-ROC code
-	     will update after the next DMD event. */
-	}
-  #endif
-  core_dmd_video_update(bitmap, cliprect, layout, &dmdlocals.pwm_state);
-  return 0;
 }
 
 /*-----------------------------
@@ -254,11 +250,10 @@ PINMAME_VIDEO_UPDATE(dedmd32_update) {
   -----------------------------*/
 static WRITE_HANDLER(dmd64_ctrl_w);
 static void dmd64_init(struct sndbrdData *brdData);
-static void dmd64_exit(int boardNo);
 static void dmd64_vblank(int which);
 
 const struct sndbrdIntf dedmd64Intf = {
-  NULL, dmd64_init, dmd64_exit, NULL,NULL,
+  NULL, dmd64_init, NULL, NULL,NULL,
   dmd_data_w, dmd_busy_r, dmd64_ctrl_w, dmd_status_r, SNDBRD_NOTSOUND
 };
 
@@ -303,11 +298,7 @@ static void dmd64_init(struct sndbrdData *brdData) {
   dmdlocals.brdData = *brdData;
   crtc6845_init(0);
   crtc6845_set_vsync(0, (12000000. / 4.) / 16., dmd64_vblank); // See explanation above for frequency (12MHz -> 3MHz -> 3MHz/16)
-  core_dmd_pwm_init(&dmdlocals.pwm_state, 192, 64, CORE_DMD_PWM_FILTER_DE_192x64, CORE_DMD_PWM_COMBINER_SUM_2_1);
-}
-
-static void dmd64_exit(int boardNo) {
-   core_dmd_pwm_exit(&dmdlocals.pwm_state);
+  core_dmd_pwm_init(core_gameData->lcdLayout, CORE_DMD_PWM_FILTER_DE_192x64, CORE_DMD_PWM_COMBINER_SUM_2_1, 0);
 }
 
 static WRITE_HANDLER(dmd64_ctrl_w) {
@@ -333,14 +324,9 @@ static void dmd64_vblank(int which) {
   unsigned int base = crtc6845_start_address_r(0); // MA0..13
   assert((base & 0x03FF) == 0x0000); // As the mapping of lowest 10 bits is not implemented (would need complex data copy and does not seem to be used by any game)
   unsigned int src = (base & 0x3C00) << 2;
-  core_dmd_submit_frame(&dmdlocals.pwm_state, (UINT8*)dmd64RAM +  src,           2); // First frame has been displayed 2/3 of the time
-  core_dmd_submit_frame(&dmdlocals.pwm_state, (UINT8*)dmd64RAM + (src | 0x0800), 1); // Second frame has been displayed 1/3 of the time
+  core_dmd_submit_frame(core_gameData->lcdLayout, (UINT8*)dmd64RAM +  src,           2); // First frame has been displayed 2/3 of the time
+  core_dmd_submit_frame(core_gameData->lcdLayout, (UINT8*)dmd64RAM + (src | 0x0800), 1); // Second frame has been displayed 1/3 of the time
   cpu_set_irq_line(dmdlocals.brdData.cpuNo, MC68000_IRQ_2, HOLD_LINE); // Note that IRQ2 is not caused by VSYNC (unwired) but generated from ROWDATA, but this seems precise enough
-}
-
-PINMAME_VIDEO_UPDATE(dedmd64_update) {
-  core_dmd_video_update(bitmap, cliprect, layout, &dmdlocals.pwm_state);
-  return 0;
 }
 
 /*------------------------------*/
@@ -355,12 +341,11 @@ PINMAME_VIDEO_UPDATE(dedmd64_update) {
 // Doesn't seems to happen anymore (lots of things have been fixed since, so hopefully fixed too)
 
 static void dmd16_init(struct sndbrdData *brdData);
-static void dmd16_exit(int boardNo);
 
 static WRITE_HANDLER(dmd16_ctrl_w);
 
 const struct sndbrdIntf dedmd16Intf = {
-  NULL, dmd16_init, dmd16_exit, NULL,NULL,
+  NULL, dmd16_init, NULL, NULL,NULL,
   dmd_data_w, dmd_busy_r, dmd16_ctrl_w, dmd_status_r, SNDBRD_NOTSOUND | SNDBRD_NODATASYNC | SNDBRD_NOCTRLSYNC | SNDBRD_NOCBSYNC
 };
 
@@ -427,11 +412,7 @@ static void dmd16_init(struct sndbrdData *brdData) {
   dmd16_reset();
 
   // Init PWM shading
-  core_dmd_pwm_init(&dmdlocals.pwm_state, 128, 16, CORE_DMD_PWM_FILTER_DE_128x16, CORE_DMD_PWM_COMBINER_SUM_1_2);
-}
-
-static void dmd16_exit(int boardNo) {
-   core_dmd_pwm_exit(&dmdlocals.pwm_state);
+  core_dmd_pwm_init(core_gameData->lcdLayout, CORE_DMD_PWM_FILTER_DE_128x16, CORE_DMD_PWM_COMBINER_SUM_1_2, 0);
 }
 
 INLINE void dmd16_interlace(UINT64 v, UINT8* row)
@@ -450,9 +431,7 @@ static void dmd16_updrow(void) {
   if (dmdlocals.blnk && dmdlocals.row_latch) {
     // row_latch always has a single bit set, the rasterized row/side, which is odd for left 64x16 panel and even for right 64x16 panel
     assert(dmdlocals.row_latch == (dmdlocals.row_latch - (dmdlocals.row_latch & dmdlocals.row_latch - 1))); // check that we only have one bit set
-    static const int MultiplyDeBruijnBitPosition[32] = 
-      { 0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9 };
-    const int row_n_side = MultiplyDeBruijnBitPosition[((UINT32)((dmdlocals.row_latch & -dmdlocals.row_latch) * 0x077CB531U)) >> 27]; // Compute index of the first trailing set bit (0 based)
+    const int row_n_side = core_BitColToNum(dmdlocals.row_latch);
     const int row = row_n_side >> 1;
     const int side = row_n_side & 1;
     //printf("%08x %2d %d %I64x\n", dmdlocals.row_latch, row, side, interlace(dmdlocals.hv5408, dmdlocals.hv5308));
@@ -466,8 +445,8 @@ static void dmd16_updrow(void) {
   }
   if (dmdlocals.blnk && dmdlocals.row_latch == 0) {
     //static double prev; printf("DMD VBlank %8.5fms => %8.5fHz for 3 frames so %8.5fHz\n", timer_get_time() - prev, 1. / (timer_get_time() - prev), 3. / (timer_get_time() - prev)); prev = timer_get_time();
-    core_dmd_submit_frame(&dmdlocals.pwm_state, (UINT8*) dmdlocals.framedata[0], 1); // First frame has been displayed 1/3 of the time
-    core_dmd_submit_frame(&dmdlocals.pwm_state, (UINT8*) dmdlocals.framedata[1], 2); // Second frame has been displayed 2/3 of the time
+    core_dmd_submit_frame(core_gameData->lcdLayout, (UINT8*) dmdlocals.framedata[0], 1); // First frame has been displayed 1/3 of the time
+    core_dmd_submit_frame(core_gameData->lcdLayout, (UINT8*) dmdlocals.framedata[1], 2); // Second frame has been displayed 2/3 of the time
   }
 }
 
@@ -575,10 +554,4 @@ static void dmd16_updbusy(int evt) {
 static void dmd16_setbank(int bit, int value) {
   dmdlocals.bank = (dmdlocals.bank & ~bit) | (value ? bit : 0);
   cpu_setbank(DMD16_BANK0, dmdlocals.brdData.romRegion + (dmdlocals.bank & 0x07)*0x4000);
-}
-
-/*-- update display --*/
-PINMAME_VIDEO_UPDATE(dedmd16_update) {
-  core_dmd_video_update(bitmap, cliprect, layout, &dmdlocals.pwm_state);
-  return 0;
 }

@@ -230,6 +230,7 @@ static READ_HANDLER(SPINB_S2_MSM5205_READROM);
 static WRITE_HANDLER(SPINB_S1_MSM5205_w);
 static WRITE_HANDLER(SPINB_S2_MSM5205_w);
 static void spinb_z80int(int data);
+static INTERRUPT_GEN(SPINBdmd_update);
 
 #if DMD_FROM_RAM
 	static UINT8  *dmd32RAM;
@@ -241,12 +242,12 @@ static void spinb_z80int(int data);
 /*----------------
 / Local variables
 /-----------------*/
-struct {
+static struct {
   int    vblankCount;
   UINT32 solenoids;
   UINT16 lampColumn;
   int    lampRow, swCol;
-  //int    diagnosticLed;
+  //UINT8  diagnosticLed;
   int    ssEn;
   int    L16isGameOn;
   int    mainIrq;
@@ -297,6 +298,7 @@ struct {
   int    nmiSeries;
   int    dmdframes;
   UINT8  dmdP1;
+  UINT8  rawDMD[128 * 32];
 } SPINBlocals;
 
 // meaning of the DMD stat0/1 lines and a macro to evaluate them
@@ -887,6 +889,8 @@ static MACHINE_INIT(spinb) {
   /* Setup DMD Serial Port Callback */
   i8051_set_serial_tx_callback(dmd_serial_callback);
 
+  core_dmd_pwm_init(core_gameData->lcdLayout, CORE_DMD_PWM_PREINTEGRATED_LINEAR_4, CORE_DMD_PWM_PREINTEGRATED_LINEAR_4, 0);
+
   /* Init the dmd & sound board */
   sndbrd_0_init(core_gameData->hw.soundBoard,   2, memory_region(SPINB_MEMREG_SND1),NULL,NULL);
   SPINBlocals.nmiSeries = 0;
@@ -1302,6 +1306,8 @@ static MACHINE_DRIVER_START(spinbdmd)
   MDRV_CPU_ADD(I8051, SPINB_8051CPU_FREQ)	/*16 Mhz*/
   MDRV_CPU_MEMORY(spinbdmd_readmem, spinbdmd_writemem)
   MDRV_CPU_PORTS(spinbdmd_readport, spinbdmd_writeport)
+  // FIXME Correctly implement PWM DMD implementation (This is a quick hack with flickering issues)
+  MDRV_CPU_PERIODIC_INT(SPINBdmd_update, 60)
   MDRV_INTERLEAVE(50)
 MACHINE_DRIVER_END
 
@@ -1420,7 +1426,7 @@ MACHINE_DRIVER_END
 //DRAW DMD FROM RAM OPTION
 
 #if DMD_FROM_RAM
-PINMAME_VIDEO_UPDATE(SPINBdmd_update) {
+static INTERRUPT_GEN(SPINBdmd_update) {
 #ifdef MAME_DEBUG
   static int offset = 0;
 #endif
@@ -1433,7 +1439,7 @@ PINMAME_VIDEO_UPDATE(SPINBdmd_update) {
 
 #ifdef MAME_DEBUG
   core_textOutf(50,20,1,"offset=%08x", offset);
-  memset(coreGlobals.dmdDotRaw,0,sizeof(coreGlobals.dmdDotRaw));
+  memset(SPINBlocals.rawDMD,0,sizeof(SPINBlocals.rawDMD));
 
   if(!debugger_focus) {
   if(keyboard_pressed_memory_repeat(KEYCODE_C,2))
@@ -1460,7 +1466,7 @@ PINMAME_VIDEO_UPDATE(SPINBdmd_update) {
 #endif
 
   for (ii = 0; ii < 32; ii++) {
-    UINT8 *line = &coreGlobals.dmdDotRaw[ii * layout->length];
+    UINT8 *line = &SPINBlocals.rawDMD[ii * layout->length];
     for (jj = 0; jj < (128/8); jj++) {
 	  UINT8 intens1, intens2, dot1, dot2;
 	  dot1 = core_revbyte(RAM[0]);
@@ -1480,8 +1486,7 @@ PINMAME_VIDEO_UPDATE(SPINBdmd_update) {
     }
     *line = 0;
   }
-  core_dmd_video_update(bitmap, cliprect, layout, NULL);
-  return 0;
+  core_dmd_submit_frame(layout, SPINBlocals.rawDMD, 1);
 }
 
 #else
@@ -1495,15 +1500,14 @@ static const int intens[3][4]= {
  {0,1,2,3}
 };
 
-PINMAME_VIDEO_UPDATE(SPINBdmd_update) {
+static INTERRUPT_GEN(SPINBdmd_update) {
   int     row,col,bit,dot;
   UINT8   *line;
   UINT8   d1,d2,d3;
 
-  memset(coreGlobals.dmdDotRaw, 0, sizeof(coreGlobals.dmdDotRaw));
   for (row=0; row < 32; row++)
   {
-    line = &coreGlobals.dmdDotRaw[row * layout->length];
+    line = &SPINBlocals.rawDMD[row * 128];
     for (col=0; col < 16; col++)
     {
       d1=dmd32RAM[0][row][col];
@@ -1519,8 +1523,6 @@ PINMAME_VIDEO_UPDATE(SPINBdmd_update) {
     }
     *line = 0;
   }
-  core_dmd_video_update(bitmap, cliprect, layout, NULL);
-  return 0;
-
+  core_dmd_submit_frame(core_gameData->lcdLayout->importedLayout ? core_gameData->lcdLayout->importedLayout : core_gameData->lcdLayout, SPINBlocals.rawDMD, 1);
 }
 #endif

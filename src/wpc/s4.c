@@ -41,7 +41,7 @@ static struct {
   UINT32 solsmooth[S4_SOLSMOOTH];
   core_tSeg segments;
   int    lampRow, lampColumn;
-  int    diagnosticLed;
+  UINT8  diagnosticLed;
   int    swCol;
   int    ssEn;
 } s4locals;
@@ -61,7 +61,7 @@ static data8_t *s4_CMOS;
 	   (14)(15)   (06)(97)
 */
 //Structure is: top, left, start, length, type
-const struct core_dispLayout s4_disp[] = {
+core_tLCDLayout s4_disp[] = {
   // Player 1            Player 2
   {0, 0, 0,6,CORE_SEG7}, {0,18, 8,6,CORE_SEG7},
   // Player 3            Player 4
@@ -105,7 +105,7 @@ static void s4_irqline(int state) {
 static INTERRUPT_GEN(s4_irq) {
   s4_irqline(1);
 #if defined(LISY_SUPPORT)
- static count = 0;
+ static int count = 0;
  //get the switches from LISY_mini (needed in test/diag mode)
  lisy_w_switch_handler();
  //reduced call to throttle in order not to interfere with timing
@@ -159,9 +159,9 @@ static WRITE_HANDLER(s4_swcol_w) {
 /*DISPLAY ALPHA  */
 /*****************/
 static WRITE_HANDLER(s4_alpha_w) {
-  int seg7 = core_bcd2seg[data >> 4];
+  UINT16 seg7 = core_bcd2seg7[data >> 4];
   if (seg7) s4locals.segments[   s4locals.alphapos].w = seg7;
-  seg7 = core_bcd2seg[data & 15];
+  seg7 = core_bcd2seg7[data & 15];
   if (seg7) s4locals.segments[20+s4locals.alphapos].w = seg7;
 }
 

@@ -56,7 +56,7 @@ extern void libpinmame_forward_console_data(void* data, int size);
 
 #define SAM_CPUFREQ 40000000
 #define SAM_IRQFREQ 4008
-
+#define SAM_DMDFREQ 62.67
 #define SAM_SOUNDFREQ 24000
 #define SAM_ZC_FREQ 120 // was 145
 // 100ms sound buffer.
@@ -144,6 +144,9 @@ struct {
 	UINT8 auxstrb;
 	UINT8 auxdata;
 
+	// DMD state
+	UINT8 rawDMD[128 * 32];
+
 	// IJ4 & CSI Flipper Solenoid hack
 	int flipSolHackCountL;
 	data32_t flipSolHackStateL;
@@ -153,8 +156,9 @@ struct {
 	data32_t flipSolHackStateUL;
 
 	// WPT
-	UINT16 latchA, latchB, latchC, latchD, latchE, latchF, latchH;
-	UINT16 col;
+	UINT8 latchA, latchB, latchC, latchD, latchE, latchF, latchH;
+	UINT16 col, prevCol;
+	UINT8 wptLEDs[14][7];
 
 	// Shrek,FG
 	UINT8 latch[4];
@@ -163,6 +167,7 @@ struct {
 	UINT8 ledLatch[6];
 	UINT8 dmdLatch[6];
 	UINT8 dmdOutputDisabled; // bool
+	UINT8 wofLEDs[5][5]; // 5 rows of 35 dots
 
 	UINT32 fastflipaddr;
 } samlocals;
@@ -795,7 +800,7 @@ static WRITE32_HANDLER(sambank_w)
 				if (core_gameData->hw.gameSpecific1 & (SAM_GAME_IJ4 | SAM_GAME_CSI)) {
 					// FIXME IJ4 & CSI have some emulation timing issues that will make the emulation regularly miss and delay the solenoid writes by 40 to 80ms (masked IRQ ?) 
 					// leading to flickering flippers. This is hidden for the flippers by counting the number of writes and only consider the state after the 48 writes (which 
-					// means that flippers suffer from eratic latencies. Previous implementations did filter out writes and react based on write count too).
+					// means that flippers suffer from erratic latencies. Previous implementations did filter out writes and react based on write count too).
 					samlocals.flipSolHackStateL |= data;
 					samlocals.flipSolHackStateR |= data;
 					data32_t hackedData;
@@ -916,9 +921,11 @@ static WRITE32_HANDLER(sambank_w)
 				// Board 520-5250-14: 14 Block LED (World Poker Tour)
 				if (core_gameData->hw.gameSpecific1 & SAM_GAME_WPT)
 				{
+					// This is a simple software rasterizer: turn blank to 1, select a single row and fill in the shift register (49 bits), turn blank to 0, wait and go for next row
+					// The timings are 2ms per row, therefore 20ms for the complete 10 rows display (2 lines of 5 rows) => 50Hz refresh rate
 					if (samlocals.auxstrb & ~data & 0x80) // ASTB
 					{
-						// 2 Latches for active columns
+						// Active column built from 3 of the serial register latches
 						samlocals.col =
 							  ((samlocals.latchH & 0x10) >> 4)  // H5 -> Col 1
 							| ((samlocals.latchH & 0x02))       // H2 -> Col 2
@@ -941,8 +948,62 @@ static WRITE32_HANDLER(sambank_w)
 						samlocals.latchB = (samlocals.latchA & 0x7F);
 						samlocals.latchA = samlocals.auxdata;
 					}
-					for (int row = 0; row < 10; row++) { // 2 rows of 7 LED matrix, each matrix being 7 cols x 5 rows (so 10 rows, 49 cols)
-						int r = ((samlocals.latchA & 0x80) || (~data & 0x80)) ? 0 : (samlocals.col & (1 << row));
+					// There have been 3 implementations:
+					// - initial was to output the matrix state in the display segment outputs, which is maintained for backward compatibility
+					// - a second based on PWM physic outputs, which is more flexible but somewhat overkill for a simple LED matrix, and disabled
+					// - the third one, which uses the core DMD system to render the matrix as a mini DMD display, is now the default
+					const int blank = (samlocals.latchA & 0x80) || (~data & 0x80);
+					if (blank == 0) {
+						if (samlocals.prevCol != samlocals.col) {
+							int display, row;
+							switch (samlocals.col) {
+							case 0x0001: display = 0; row = 0; break;
+							case 0x0002: display = 0; row = 1; break;
+							case 0x0004: display = 0; row = 2; break;
+							case 0x0008: display = 0; row = 3; break;
+							case 0x0010: display = 0; row = 4; break;
+							case 0x0020: display = 7; row = 0; break;
+							case 0x0040: display = 7; row = 1; break;
+							case 0x0080: display = 7; row = 2; break;
+							case 0x0100: display = 7; row = 3; break;
+							case 0x0200: display = 7; row = 4; break;
+							default: assert(FALSE); break;
+							}
+							samlocals.wptLEDs[display    ][row] = samlocals.latchH;
+							samlocals.wptLEDs[display + 1][row] = samlocals.latchF;
+							samlocals.wptLEDs[display + 2][row] = samlocals.latchE;
+							samlocals.wptLEDs[display + 3][row] = samlocals.latchD;
+							samlocals.wptLEDs[display + 4][row] = samlocals.latchC;
+							samlocals.wptLEDs[display + 5][row] = samlocals.latchB;
+							samlocals.wptLEDs[display + 6][row] = samlocals.latchA;
+							if (samlocals.col == 0x200) { // Last row, submit frame
+								for (int i = 0; i < 14; i++) {
+									const core_tLCDLayout* layout = &core_gameData->lcdLayout[1 + i];
+									// Submit to core DMD handler: we need to swap rows & columns
+									UINT8 rot[7] = { 0, 0, 0, 0, 0, 0, 0 };
+									for (int k = 0; k < 7; k++)
+										for (int j = 0; j < 5; j++)
+											rot[k] = (rot[k] << 1) | ((samlocals.wptLEDs[i][j] >> k) & 0x01);
+									for (int k = 0; k < 7; k++)
+										samlocals.wptLEDs[i][k] = rot[6 - k] << 3;
+									core_dmd_submit_frame(layout, samlocals.wptLEDs[i], 1);
+									// Output mini DMD as LED segments (backward compatibility)
+									const int dmd_x = (layout->left - 10) / 7;
+									const int dmd_y = (layout->top - 34) / 9;
+									for (int x = 0; x < 5; x++) {
+										int bits = 0;
+										for (int y = 0; y < 7; y++)
+                                 bits = (bits << 1) | ((samlocals.wptLEDs[i][y] >> (3 + x)) & 0x01);
+										coreGlobals.drawSeg[35 * dmd_y + 5 * dmd_x + 4 - x] = bits;
+									}
+								}
+							}
+							samlocals.prevCol = samlocals.col;
+						}
+					}
+					// Previous implementation using PWM physic outputs (somewhat overkill for LED matrix, but works)
+					/*for (int row = 0; row < 10; row++) { // 2 rows of 7 LED matrix, each matrix being 7 cols x 5 rows (so 10 rows, 49 cols)
+						int r = blank ? 0 : (samlocals.col & (1 << row));
 						int c = CORE_MODOUT_LAMP0 + 10 * 8 + 49 * row;
 						core_write_pwm_output(c     , 7, r ? (core_revbyte((UINT8)samlocals.latchH) >> 1) : 0);
 						core_write_pwm_output(c +  7, 7, r ? (core_revbyte((UINT8)samlocals.latchF) >> 1) : 0);
@@ -951,8 +1012,8 @@ static WRITE32_HANDLER(sambank_w)
 						core_write_pwm_output(c + 28, 7, r ? (core_revbyte((UINT8)samlocals.latchC) >> 1) : 0);
 						core_write_pwm_output(c + 35, 7, r ? (core_revbyte((UINT8)samlocals.latchB) >> 1) : 0);
 						core_write_pwm_output(c + 42, 7, r ? (core_revbyte((UINT8)samlocals.latchA) >> 1) : 0);
-					}
-					//printf("%8.5f s=%02x d=%02x    %02x %02x %02x %02x %02x %02x %02x   Col=%03x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.latchA, samlocals.latchB, samlocals.latchC, samlocals.latchD, samlocals.latchE, samlocals.latchF, samlocals.latchH, col, (samlocals.latchA & 0x80) ? 1 : 0);
+					}*/
+					//printf("%8.5f s=%02x d=%02x    %02x %02x %02x %02x %02x %02x %02x   Col=%03x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.latchA, samlocals.latchB, samlocals.latchC, samlocals.latchD, samlocals.latchE, samlocals.latchF, samlocals.latchH, samlocals.col, blank);
 				}
 
 				// Board 520-5264-00: Family Guy & Shrek mini playfield LEDs
@@ -1000,6 +1061,8 @@ static WRITE32_HANDLER(sambank_w)
 					//printf("%8.5f  write %02x %02x:  %02x %02x %02x  %02x %02x %02x\n", timer_get_time(), data, samlocals.auxdata, samlocals.ledLatch[0], samlocals.ledLatch[1], samlocals.ledLatch[2], samlocals.ledLatch[3], samlocals.ledLatch[4], samlocals.ledLatch[5]);
 
 					// Board 520-5274-00: Playfield Mini-Dot Display (5X7) (Wheel of Fortune)
+					// This is a simple software rasterizer: turn blank to 1, select a single row and fill in the shift register (49 bits), turn blank to 0, wait and go for next row
+					// The timings are 1ms per row, therefore 5ms for the complete 5 rows display (5 rows of 35 dots) => 200Hz refresh rate
 					if (samlocals.auxstrb & ~data & 0x10) // CSTB
 					{
 						UINT8 wasOutputDisabled = samlocals.dmdOutputDisabled;
@@ -1014,7 +1077,38 @@ static WRITE32_HANDLER(sambank_w)
 							samlocals.dmdLatch[0] = samlocals.auxdata;
 						}
 					}
-					int col = (samlocals.dmdOutputDisabled || (~data & 0x80)) ? 0 : samlocals.dmdLatch[5];
+					// There have been 3 implementations:
+					// - initial was to output the matrix state in the display segment outputs, which is maintained for backward compatibility
+					// - a second based on PWM physic outputs, which is more flexible but somewhat overkill for a simple LED matrix, and disabled
+					// - the third one, which uses the core DMD system to render the matrix as a mini DMD display, is now the default
+					const int blank = samlocals.dmdOutputDisabled || (~data & 0x80);
+					if (blank == 0) {
+						samlocals.col = samlocals.dmdLatch[5] & 0x1F;
+						if (samlocals.prevCol != samlocals.col) {
+							const int row = core_BitColToNum(samlocals.col);
+							samlocals.wofLEDs[row][0] = (samlocals.dmdLatch[4] << 1) | ((samlocals.dmdLatch[3] >> 6) & 0x01);
+							samlocals.wofLEDs[row][1] = (samlocals.dmdLatch[3] << 2) | ((samlocals.dmdLatch[2] >> 5) & 0x03);
+							samlocals.wofLEDs[row][2] = (samlocals.dmdLatch[2] << 3) | ((samlocals.dmdLatch[1] >> 4) & 0x07);
+							samlocals.wofLEDs[row][3] = (samlocals.dmdLatch[1] << 4) | ((samlocals.dmdLatch[0] >> 3) & 0x0F);
+							samlocals.wofLEDs[row][4] = (samlocals.dmdLatch[0] << 5);
+							if (samlocals.col == 0x010) { // Last row, submit frame
+								const core_tLCDLayout* layout = &core_gameData->lcdLayout[1];
+								// Submit to core DMD handler
+								core_dmd_submit_frame(layout, &samlocals.wofLEDs[0][0], 1);
+								// Output mini DMD as LED segments (backward compatibility)
+								for (int ii = 0; ii < 35; ii++) {
+									UINT16 bits = 0;
+									const int c = ii / 8, shift = 7 - (ii & 7);
+									for (int kk = 0; kk < 5; kk++)
+										bits = (bits << 1) | ((samlocals.wofLEDs[kk][c] >> shift) & 0x01);
+									coreGlobals.drawSeg[ii] = bits;
+								}
+							}
+							samlocals.prevCol = samlocals.col;
+						}
+					}
+					// Previous implementation using PWM physic outputs (somewhat overkill for LED matrix, but works)
+					/*int col = blank ? 0 : samlocals.dmdLatch[5];
 					for (int row = 0; row < 5; row++) {
 						int r = col & (1 << row);
 						int c = CORE_MODOUT_LAMP0 + 140 + 35 * row;
@@ -1023,8 +1117,8 @@ static WRITE32_HANDLER(sambank_w)
 						core_write_pwm_output(c + 14, 7, r ? (core_revbyte(samlocals.dmdLatch[2]) >> 1) : 0);
 						core_write_pwm_output(c + 21, 7, r ? (core_revbyte(samlocals.dmdLatch[1]) >> 1) : 0);
 						core_write_pwm_output(c + 28, 7, r ? (core_revbyte(samlocals.dmdLatch[0]) >> 1) : 0);
-					}
-					//printf("%8.5f  write %02x %02x: %02x %02x %02x %02x %02x  col=%02x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.dmdLatch[0], samlocals.dmdLatch[1], samlocals.dmdLatch[2], samlocals.dmdLatch[3], samlocals.dmdLatch[4], col & 0x1F, samlocals.dmdOutputDisabled ? 0 : 1);
+					}*/
+					//printf("%8.5f  write %02x %02x: %02x %02x %02x %02x %02x  col=%02x Blank=%d\n", timer_get_time(), data, samlocals.auxdata, samlocals.dmdLatch[0], samlocals.dmdLatch[1], samlocals.dmdLatch[2], samlocals.dmdLatch[3], samlocals.dmdLatch[4], col & 0x1F, blank);
 				}
 
 				// Board 520-5290-00: Opto and auxiliary LED PCB (Batman The Dark Knight & CSI): 3 LEDs #86, #87, #88
@@ -1054,14 +1148,14 @@ static WRITE32_HANDLER(sambank_w)
 					core_write_pwm_output(CORE_MODOUT_LAMP0 + 152 - 1, 8, samlocals.auxdata); // 151..158
 
 				// Board 520-6801-00: Magnet processor (Metallica)
-				if ((core_gameData->hw.gameSpecific1 & SAM_GAME_METALLICA_MAGNET) && (~data & 0x08)) // BSTB (not sure if it is trigerred by edge or state since it uses a microcontroller)
+				if ((core_gameData->hw.gameSpecific1 & SAM_GAME_METALLICA_MAGNET) && (~data & 0x08)) // BSTB (not sure if it is triggered by edge or state since it uses a microcontroller)
 				{
 					// Operation mode is strobed here from the 2 highest bits D6/D7 of Aux Data
 					// 00 => Off
 					// 10 => Grab: activate magnet for 1 second then switch it off. It grabs the ball from centimeters away
 					// 01 => Detect: detect ball and report it to switch 63
-					// 11 => Detect & Hold: detect ball, if detected report to switch 63 and also grab it
-					// See https://missionpinball.org/mechs/magnets/stern_magnet_pcb/ for a detailled description:
+					// 11 => Detect & Hold: detect ball, if detected, report to switch 63 and also grab it
+					// See https://missionpinball.org/mechs/magnets/stern_magnet_pcb/ for a detailed description:
 					core_write_pwm_output(CORE_MODOUT_SOL0 + CORE_FIRSTCUSTSOL + 6 - 1, 1, samlocals.auxdata >> 7);
 					core_write_pwm_output(CORE_MODOUT_SOL0 + CORE_FIRSTCUSTSOL + 7 - 1, 1, samlocals.auxdata >> 6);
 				}
@@ -1246,6 +1340,20 @@ static MACHINE_INIT(sam) {
 	if(!fpSND)
 		LOG(("Unable to create sam_snd.raw file\n"));
 	#endif
+
+	// Initialize DMDs
+	if (core_gameData->hw.gameSpecific1 & SAM_GAME_WPT) {
+		core_dmd_pwm_init(core_gameData->lcdLayout->importedLayout, CORE_DMD_PWM_PREINTEGRATED_SAM, CORE_DMD_PWM_PREINTEGRATED_SAM, 0);
+		for (int i = 0; i < 14; i++) // 14 WPT mini DMDs (7x5 LED matrix)
+			core_dmd_pwm_init(&core_gameData->lcdLayout[i + 1], CORE_DMD_PWM_FILTER_WPC_PH, CORE_DMD_PWM_COMBINER_1, 0); // WPC_PH is 61Hz and the mini DMD are 50Hz, so it is ok
+	}
+	else if (core_gameData->hw.gameSpecific1 & SAM_GAME_WOF) {
+		core_dmd_pwm_init(core_gameData->lcdLayout->importedLayout, CORE_DMD_PWM_PREINTEGRATED_SAM, CORE_DMD_PWM_PREINTEGRATED_SAM, 0);
+		core_dmd_pwm_init(&core_gameData->lcdLayout[1], CORE_DMD_PWM_FILTER_DE_128x32, CORE_DMD_PWM_COMBINER_1, 0); // WOF mini DMD (35x5 LED matrix), DE_128x32 is 224Hz and the mini DMD is 200Hz, so it is ok
+	}
+	else {
+		core_dmd_pwm_init(core_gameData->lcdLayout->importedLayout, CORE_DMD_PWM_PREINTEGRATED_SAM, CORE_DMD_PWM_PREINTEGRATED_SAM, 0);
+	}
 
 	// Initialize outputs
 	// Force physical output emulation since we use them to compute solenoids
@@ -1443,7 +1551,8 @@ static MACHINE_INIT(sam) {
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 78 - 1, 1, CORE_MODOUT_LED_STROBE_1_10MS); // Bumper LED
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 22 - 1, 2, CORE_MODOUT_BULB_89_20V_DC_WPC);
 		core_set_pwm_output_type(CORE_MODOUT_SOL0 + 25 - 1, 7, CORE_MODOUT_BULB_89_20V_DC_WPC);
-		core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80 - 1, 49 * 10, CORE_MODOUT_LED_STROBE_1_10MS); // 14 Block LED (actually 2ms strobe every 20ms, but are they really faded ?)
+		// Removed in favor of DMD implementation
+		// core_set_pwm_output_type(CORE_MODOUT_LAMP0 + 80 - 1, 49 * 10, CORE_MODOUT_LED_STROBE_1_10MS); // 14 Block LED (actually 2ms strobe every 20ms, but are they really faded ?)
 	}
 	else if (strncasecmp(gn, "xmn_", 4) == 0) { // X-Men
 		core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80, CORE_MODOUT_LED_STROBE_1_10MS); // All LED (Looks nicer with bulbs, but it really has LEDs)
@@ -1472,7 +1581,7 @@ void sam_init(void)
 	else
 		at91_block_timers = 0;
 
-	// Fast flips support.   My process for finding these is to load them in pinmame32 in VC debugger.
+	// Fast flips support.   My process for finding these, is to load them in pinmame32 in VC debugger.
 	// Load the balls in trough (E+SDFG(maybe also HJ)), start the game.
 	// Use CheatEngine to find byte memory locations that are 1.
 	// Enter service menu.  Use cheatengine to find memory locations that are 0.
@@ -1657,7 +1766,7 @@ static SWITCH_UPDATE(sam) {
 //   But when updating the nodeboard firmware, the CPU only writes to the flash ROM after the first 0x1000 bytes.
 //   These 4Kb of memory contains static information which is likely flashed in factory and never changed.
 //   Therefore values for these are guessed by reverse engineering what the CPU expects when reading. These
-//   could also be obtained from real boards, or exploiting the 0xF5 GetChecksum command but noone has done
+//   could also be obtained from real boards, or exploiting the 0xF5 GetChecksum command but no-one has done
 //   that yet.
 //
 //   The child nodeboards use LPC11xx/LPC13xx controllers, for which there has been an attempt to reverse engineer
@@ -1678,7 +1787,7 @@ static SWITCH_UPDATE(sam) {
 //   Bridge->CPU: Data then Checksum
 //    . CPU and Bridge know the length of the response so the protocol is just the corresponding data with a (negative) checksum
 // 
-// Communication between bridge and child nodeboards is not emulated here since the high level emulation is done at the bridhe node.
+// Communication between bridge and child nodeboards is not emulated here since the high level emulation is done at the bridge node.
 
 #define SAM_NB_TYPE_520_5331_00           0 // Metallica Premium Monsters, Grinder Multi-Color LED driver
 #define SAM_NB_TYPE_520_6937_10           1 // TWD with a LPC1112HN33/101 (schematics in the TWD LE manual, using firmware included in the main CPU gamecode)
@@ -1693,7 +1802,7 @@ static SWITCH_UPDATE(sam) {
 #define SAM_NB_STATUS_RESET_WDG           0x0004 // Last reset cause: watchdog (or F1 command)
 #define SAM_NB_STATUS_RESET_BOD           0x0008 // Last reset cause: reset from BOD (brown-out detect: supply voltage went below minimum causing a reset)
 #define SAM_NB_STATUS_UART_OVERRUN        0x0010 // UART overrun error
-#define SAM_NB_STATUS_UART_FRAMING_ERR    0x0020 // UART framing eroor
+#define SAM_NB_STATUS_UART_FRAMING_ERR    0x0020 // UART framing error
 #define SAM_NB_STATUS_UART_BREAK_INT      0x0040 // UART break interrupt
 #define SAM_NB_STATUS_FAULT               0x0080 // Fault on board output (/FAULT signal)
 #define SAM_NB_STATUS_MSG_LENGTH_OVERFLOW 0x0100 // Message length overflow (message is too long)
@@ -1921,11 +2030,11 @@ static void sam_nodebus_msg_received()
 				// 48 outputs driving 16 RGB Leds. Intensity is expressed as 0..100 (so 101 levels)
 				// nblocals.rcvMsg[1] is likely a fade command but I have only witnessed 0x00 there
 				for (int i = 0; i < 48; i++)
-					coreGlobals.physicOutputState[nblocals.nodeboards[0].ledMap[i]].value = nblocals.rcvMsg[2 + i] / 100.f;
+					coreGlobals.physicOutputState[nblocals.nodeboards[0].ledMap[i]].value = (float)nblocals.rcvMsg[2 + i] / 100.f;
 				break;
 			case 0x90:
 				// GI Outputs, for backward compatibility we map them to lamps 130/132/134/136, intensity goes from 0..50 (51 levels)
-				coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 129 + ((cmd & 0x0F) * 2)].value = nblocals.rcvMsg[1] / 50.f;
+				coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + 129 + ((cmd & 0x0F) * 2)].value = (float)nblocals.rcvMsg[1] / 50.f;
 				break;
 			}
 		}
@@ -1963,7 +2072,7 @@ static void sam_nodebus_msg_received()
 				if ((nblocals.bridge == SAM_NB_STARTREK) || (nblocals.bridge == SAM_NB_MUSTANG) ) {
 					int ledCount = payload - 1;
 					for (int i = 0; i < ledCount; i++)
-						coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = nblocals.rcvMsg[3 + i] / 255.f;
+						coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = (float)nblocals.rcvMsg[3 + i] / 255.f;
 				}
 				else {
 					int ledCount = payload - 3;
@@ -1974,11 +2083,11 @@ static void sam_nodebus_msg_received()
 						assert((ledCount * 2) == (payload - 3));
 						for (int i = 0; i < ledCount; i++)
 							// nblocals.rcvMsg[4 + i * 2 + 0] is the fade mode per Led (not implemented)
-							coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = nblocals.rcvMsg[4 + i * 2 + 1] / 255.f;
+							coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = (float)nblocals.rcvMsg[4 + i * 2 + 1] / 255.f;
 					}
 					else { // Global fade mode
 						for (int i = 0; i < ledCount; i++)
-							coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = nblocals.rcvMsg[4 + i] / 255.f;
+							coreGlobals.physicOutputState[nodeboard->ledMap[startLedIndex + i]].value = (float)nblocals.rcvMsg[4 + i] / 255.f;
 					}
 				}
 			}
@@ -2143,6 +2252,44 @@ static INTERRUPT_GEN(sam_irq)
 	at91_fire_irq(AT91_FIQ_IRQ);
 }
 
+/*-- 
+  SAM DMD display uses 32 x 128 pixels by accessing 0x1000 bytes per page.
+  That's 8 bits for each pixel, but they are distributed into 4 brightness
+  bits (16 colors), and 4 translucency bits that perform the masking of the
+  secondary or "background" page that will "shine through" if the mask bits
+  of the foreground are set.
+
+  SAM rasterizer renders each line 4 times with different display lengths 
+  to create shades. Each line is therefore made up of a pattern of 12 x 41.55us, 
+  with the 4 planes corresponding to combination of 1 / 2 / 4 / 5 of these 12 
+  time slots. The resulting frame rate is 1e6/(32x12x41.55) = 62.67Hz which 
+  has been validated with real hardware measures. The flicker/fusion threshold 
+  is supposed to be somewhere around 25-30Hz based on the fact that other 
+  hardware like GTS3 and WPC feature PWM patterns around these frequencies.
+  Therefore, to get the final luminance, we would need to perform integration 
+  of at least the last 24 frames. As this leads to very little inter PWM frame
+  interaction, we simply apply a LUT corresponding to the 1 / 2 / 4 / 5 pattern.
+--*/
+static INTERRUPT_GEN(sam_dmd) {
+	for(int ii = 0; ii < 32; ii++ )
+	{
+		UINT8 *dotRaw = &samlocals.rawDMD[ii * 128];
+		const UINT8* const offs1 = memory_region(REGION_CPU1) + 0x1080000 + (samlocals.video_page[0] << 12) + ii * 128;
+		const UINT8* const offs2 = memory_region(REGION_CPU1) + 0x1080000 + (samlocals.video_page[1] << 12) + ii * 128;
+		for(int jj = 0; jj < 128; jj++ )
+		{
+			const UINT8 RAM1 = offs1[jj];
+			const UINT8 RAM2 = offs2[jj];
+			const UINT8 mix = RAM1 >> 4;
+			const UINT8 temp = (RAM2 & mix) | (RAM1 & (mix^0xF)); //!! is this correct or is mix rather a multiplier/ratio/alphavalue??
+			if ((mix != 0xF) && (mix != 0x0)) //!! happens e.g. in POTC in extra ball explosion animation: RAM1 values triggering this: 223, 190, 175, 31, 25, 19, 17 with RAM2 being always 0. But is this just wrong game data (as its a converted animation)?!
+				LOG(("Special DMD Bitmask %01X RAM1=%02x RAM2=%02x pix@(%3dx%2d)", mix, RAM1, RAM2, jj, ii));
+			*dotRaw++ = temp;
+		}
+	}
+   core_dmd_submit_frame(core_gameData->lcdLayout->importedLayout ? core_gameData->lcdLayout->importedLayout : core_gameData->lcdLayout, samlocals.rawDMD, 1);
+}
+
 /*********************************************/
 /* S.A.M. Generation #1 - Machine Definition */
 /*********************************************/
@@ -2154,6 +2301,7 @@ static MACHINE_DRIVER_START(sam1)
     MDRV_CPU_PORTS(sam_readport, sam_writeport)
     MDRV_CPU_VBLANK_INT(sam_interface_update, 1)
     MDRV_CPU_PERIODIC_INT(sam_irq, SAM_IRQFREQ)
+    MDRV_CPU_PERIODIC_INT(sam_dmd, SAM_DMDFREQ)
     MDRV_CORE_INIT_RESET_STOP(sam, sam1, sam)
     MDRV_DIPS(8)
     MDRV_NVRAM_HANDLER(sam)
@@ -2177,135 +2325,33 @@ MACHINE_DRIVER_END
 		gen, disp, {FLIP_SW(FLIP_L) | FLIP_SOL(FLIP_L), 0, lampcol, 16, 0, 0, hw,0, sam_getSol}}; \
 	static void init_##name(void) { core_gameData = &name##GameData; }
 
-/*****************/
-/*  DMD Section  */
-/*****************/
-
-/*-- 
-  SAM DMD display uses 32 x 128 pixels by accessing 0x1000 bytes per page.
-  That's 8 bits for each pixel, but they are distributed into 4 brightness
-  bits (16 colors), and 4 translucency bits that perform the masking of the
-  secondary or "background" page that will "shine through" if the mask bits
-  of the foreground are set.
-
-  SAM rasterizer renders each line 4 times with different display lengths 
-  to create shades. Each line is therefore made up of a pattern of 12 x 41.55us, 
-  with the 4 planes corresponding to combination of 1 / 2 / 4 / 5 of these 12 
-  time slots. The resulting frame rate is 1e6/(32x12x41.55) = 62.67Hz which 
-  has been validated with real hardware measure. The flicker/fusion threshold 
-  is supposed to be somewhere around 25-30Hz based on the fact that other 
-  hardwares like GTS3 and WPC have PWM pattern around these frequencies.
-  Therefore, to get the final luminance, we need to perform integration of at
-  least the last 24 frames. For the time being we only apply a LUT corresponding
-  to the 1 / 2 / 4 / 5 pattern.
---*/
-static PINMAME_VIDEO_UPDATE(samdmd_update) {
-	// This LUT suppose that each bitplane correspond to one of the frame, since the display length is 1 / 2 / 4 / 5,
-	// RAM never contains 8/9/10/11 which creates a monotonic LUT, but with a discontinuity as the hardware has 13 shades while the code uses 12.
-	static const float lumLUT[16] = { 0.f, 1.f/12.f, 2.f/12.f, 3.f/12.f, 4.f/12.f, 5.f/12.f, 6.f/12.f, 7.f/12.f, 5.f/12.f /*unused*/, 6.f/12.f /*unused*/, 7.f/12.f /*unused*/, 8.f/12.f /*unused*/, 9.f/12.f, 10.f/12.f, 11.f/12.f, 1.f};
-	int ii;
-	for( ii = 0; ii < 32; ii++ )
-	{
-		UINT8 *dotRaw = &coreGlobals.dmdDotRaw[ii * layout->length];
-		float *dotLum = &coreGlobals.dmdDotLum[ii * layout->length];
-		const UINT8* const offs1 = memory_region(REGION_CPU1) + 0x1080000 + (samlocals.video_page[0] << 12) + ii * 128;
-		const UINT8* const offs2 = memory_region(REGION_CPU1) + 0x1080000 + (samlocals.video_page[1] << 12) + ii * 128;
-		int jj;
-		for( jj = 0; jj < 128; jj++ )
-		{
-			const UINT8 RAM1 = offs1[jj];
-			const UINT8 RAM2 = offs2[jj];
-			const UINT8 mix = RAM1 >> 4;
-			const UINT8 temp = (RAM2 & mix) | (RAM1 & (mix^0xF)); //!! is this correct or is mix rather a multiplier/ratio/alphavalue??
-			if ((mix != 0xF) && (mix != 0x0)) //!! happens e.g. in POTC in extra ball explosion animation: RAM1 values triggering this: 223, 190, 175, 31, 25, 19, 17 with RAM2 being always 0. But is this just wrong game data (as its a converted animation)?!
-				LOG(("Special DMD Bitmask %01X RAM1=%02x RAM2=%02x pix@(%3dx%2d)", mix, RAM1, RAM2, jj, ii));
-			*dotRaw++ = temp;
-			*dotLum++ = lumLUT[temp];
-		}
-	}
-	core_dmd_video_update(bitmap, cliprect, layout, NULL);
-	return 0;
-}
-
-#define SAT_NYB(v) (UINT8)(15.0f * (v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v))
-#define SAT_BYTE(v) (UINT8)(255.0f * (v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v))
-
-// Little 5x7 led matrix used in World Poker Tour (2 rows of 7 each)
-static PINMAME_VIDEO_UPDATE(samminidmd_update) {
-    const int dmd_x = (layout->left-10)/7;
-    const int dmd_y = (layout->top-34)/9;
-    assert(layout->length == 5);
-    assert(layout->start == 7);
-    assert(0 <= dmd_x && dmd_x < 7);
-    assert(0 <= dmd_y && dmd_y < 2);
-    for (int y = 0; y < 7; y++)
-		for (int x = 0; x < 5; x++) {
-			const int target = 10 * 8 + (dmd_y * 5 + x) * 49 + (dmd_x * 7 + y);
-			const float v = coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + target].value;
-			coreGlobals.dmdDotRaw[y * 5 + x] = SAT_NYB(v); // TODO raw value should not be tied to the PWM integration
-			coreGlobals.dmdDotLum[y * 5 + x] = SAT_BYTE(v);
-		}
-    // Use the video update to output mini DMD as LED segments (somewhat hacky)
-    for (int x = 0; x < 5; x++) {
-        int bits = 0;
-        for (int y = 0; y < 7; y++)
-            bits = (bits << 1) | (coreGlobals.dmdDotRaw[y * 5 + x] ? 1 : 0);
-        coreGlobals.drawSeg[35 * dmd_y + 5 * dmd_x + x] = bits;
-    }
-    if (!pmoptions.dmd_only)
-        core_dmd_video_update(bitmap, cliprect, layout, NULL);
-    return 0;
-}
-
-// Wheel of Fortune Led matrix display
-static PINMAME_VIDEO_UPDATE(samminidmd2_update) {
-    int ii,jj,kk;
-    for (jj = 0; jj < 35; jj++)
-		for (kk = 0; kk < 5; kk++) {
-			const int target = 140 + jj + (kk * 35);
-			const float v = coreGlobals.physicOutputState[CORE_MODOUT_LAMP0 + target].value;
-			coreGlobals.dmdDotRaw[kk * layout->length + jj] = SAT_NYB(v); // TODO raw value should not be tied to the PWM integration
-			coreGlobals.dmdDotLum[kk * layout->length + jj] = SAT_BYTE(v);
-		}
-    // Use the video update to output mini DMD as LED segments (somewhat hacky)
-    for (ii = 0; ii < 35; ii++) {
-      int bits = 0;
-      for (kk = 0; kk < 5; kk++)
-        bits = (bits<<1) | (coreGlobals.dmdDotRaw[kk * layout->length + ii] ? 1 : 0);
-      coreGlobals.drawSeg[ii] = bits;
-    }
-    if (!pmoptions.dmd_only)
-      core_dmd_video_update(bitmap, cliprect, layout, NULL);
-    return 0;
-}
-
 static struct core_dispLayout sam_dmd128x32[] = {
-	{0, 0, 32, 128, CORE_DMD/*| CORE_DMDNOAA*/, (genf*)samdmd_update},
+	{0, 0, 32, 128, CORE_DMD/*| CORE_DMDNOAA*/, NULL },
 	{0}
 };
 
 static struct core_dispLayout sammini1_dmd128x32[] = {
 	DISP_SEG_IMPORT(sam_dmd128x32),
-	{34, 10, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{34, 17, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{34, 24, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{34, 31, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{34, 38, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{34, 45, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{34, 52, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 10, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 17, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 24, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 31, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 38, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 45, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
-	{43, 52, 7, 5, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd_update},
+	{34, 10, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{34, 17, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{34, 24, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{34, 31, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{34, 38, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{34, 45, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{34, 52, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 10, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 17, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 24, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 31, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 38, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 45, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
+	{43, 52, 7, 5, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
 	{0}
 };
 
 static struct core_dispLayout sammini2_dmd128x32[] = {
 	DISP_SEG_IMPORT(sam_dmd128x32),
-	{34, 10, 5, 35, CORE_DMD|CORE_DMDNOAA | CORE_NODISP, (genf *)samminidmd2_update},
+	{34, 10, 5, 35, CORE_DMD | CORE_DMDNOAA | CORE_NODISP, NULL },
 	{0}
 };
 
@@ -2371,7 +2417,7 @@ CORE_CLONEDEF(sam1_flashb, 0230, 0310, "S.A.M. System Flash Boot (V2.3)", 2007, 
 /*-------------------------------------------------------------------
 / World Poker Tour
 /-------------------------------------------------------------------*/
-INITGAME(wpt, GEN_SAM, sammini1_dmd128x32, SAM_2COL + 60, SAM_GAME_WPT) // 62 additinal columns for Mini DMD (5*7 displays * 14)
+INITGAME(wpt, GEN_SAM, sammini1_dmd128x32, SAM_2COL, SAM_GAME_WPT)
 
 SAM1_ROM32MB(wpt_103a, "wpt_103a.bin", CRC(cd5f80bc) SHA1(4aaab2bf6b744e1a3c3509dc9dd2416ff3320cdb), 0x019bb1dc)
 
@@ -2767,8 +2813,8 @@ static void wof_drawMech(BMTYPE **line) {
 	core_textOutf(35, 10, BLACK, "Wheel Pos   : %3d", wof_getMech(0));
 }
 
-static core_tGameData wofGameData = { // 62 additional LED columns for MiniDMD (35x14 DMD = 490 LEDs)
-	GEN_SAM, sammini2_dmd128x32, {FLIP_SW(FLIP_L) | FLIP_SOL(FLIP_L), 0, SAM_8COL + 62, 16, 0, 0, SAM_GAME_WOF ,0, sam_getSol, wof_handleMech, wof_getMech, wof_drawMech}
+static core_tGameData wofGameData = {
+	GEN_SAM, sammini2_dmd128x32, {FLIP_SW(FLIP_L) | FLIP_SOL(FLIP_L), 0, SAM_8COL, 16, 0, 0, SAM_GAME_WOF ,0, sam_getSol, wof_handleMech, wof_getMech, wof_drawMech}
 };
 
 static void init_wof(void) { 
@@ -2827,7 +2873,7 @@ CORE_CLONEDEF(wof, 500l, 500, "Wheel of Fortune (V5.0 Spanish)", 2007, "Stern", 
 
 // V6.00I missing, compiled by Keith for tournaments/IFPA:
 /*
-I released a version of software, “6.00I” (for IFPA, I don’t remember what tournament it was for) or some such,
+I released a version of software, "6.00I" (for IFPA, I don’t remember what tournament it was for) or some such,
 that basically added some competition mode stuff (derandomized wild card and big spin).
 Those are the ONLY changes from 5.00 which is the last public release I did while at Stern.
 6.00I was circulated a fair amount amongst tournament types, mostly those running tournaments.
@@ -2835,21 +2881,21 @@ Those are the ONLY changes from 5.00 which is the last public release I did whil
 
 CORE_CLONEDEF(wof, 602h, 500, "Wheel of Fortune (V6.02 Home Rom)", 2009, "Stern", sam1, 0) // unofficial version, but apparently compiled by Stern
 /*
-As someone stated, the main gameplay change that is noticeable is that there are “mode goals.”
+As someone stated, the main gameplay change that is noticeable is that there are "mode goals."
 The goal is simply to score x points before time runs out. If you get the goal, you won, great.
-The next mode, the goal would be higher. If you didn’t win, oh well, the next mode, the goal would be lower.
+The next mode, the goal would be higher. If you didn't win, oh well, the next mode, the goal would be lower.
 Also, you could replay the mode you failed, at 2x points.
 If you failed the same mode twice, you could play it a 3rd time for 3x points.
-If you failed 3 times, the game gave up. Oh, also for each mode you won, you got a “winnings x” for that ball’s bonus.
-IIRC there’s no logic for completing the wheel yet, but the reward was going to be something like 10M for each mode won on try #1,
+If you failed 3 times, the game gave up. Oh, also for each mode you won, you got a "winnings x" for that ball's bonus.
+IIRC there's no logic for completing the wheel yet, but the reward was going to be something like 10M for each mode won on try #1,
 5M for each on try #2, 2.5M for each on try #3, and 1M for failed modes.
 If by some unfathomable stroke of luck you completed every mode on the first try, you’d get a bonus to round up the total to 100M.
 */
 /*
-The mode stuff is basically there’s a common goal of points (starts at 5M).
+The mode stuff is basically there's a common goal of points (starts at 5M).
 If you finish a mode, the goal goes up, if you lose a mode, the goal goes down.
-If you don’t finish a mode, it stays in the rotation, and if you play it again it scores 2x, and if you fail and play again it’s 3x.
-If you don’t hit the goal after 3x, it stops trying. Winning a mode also gives you a winnings x for that ball.
+If you don't finish a mode, it stays in the rotation, and if you play it again it scores 2x, and if you fail and play again it's 3x.
+If you don't hit the goal after 3x, it stops trying. Winning a mode also gives you a winnings x for that ball.
 This was all meant to lead up to a payout for hitting the goal in every mode:
 10M/5M/2.5M/1M for finishing in 1 try / 2 tries / 3 tries / DNF.
 If you finished every goal on the first try (somehow), the bonus would get augmented to 100M.

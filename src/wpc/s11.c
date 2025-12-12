@@ -53,21 +53,21 @@ static MACHINE_STOP(s11);
 static NVRAM_HANDLER(s11);
 static NVRAM_HANDLER(de);
 //top, left, start, length, type
-const struct core_dispLayout s11_dispS9[] = {
+core_tLCDLayout s11_dispS9[] = {
   {4, 0, 1,7, CORE_SEG87}, {4,16, 9,7, CORE_SEG87},
   {0, 0,21,7, CORE_SEG87}, {0,16,29,7, CORE_SEG87},
   DISP_SEG_CREDIT(0,8,CORE_SEG7S),DISP_SEG_BALLS(20,28,CORE_SEG7S),{0}
 };
-const struct core_dispLayout s11_dispS11[] = {
+core_tLCDLayout s11_dispS11[] = {
   DISP_SEG_7(0,0,CORE_SEG16),DISP_SEG_7(0,1,CORE_SEG16),
   DISP_SEG_7(1,0,CORE_SEG8), DISP_SEG_7(1,1,CORE_SEG8),
   {2,8,0,1,CORE_SEG7S},{2,10,8,1,CORE_SEG7S}, {2,2,20,1,CORE_SEG7S},{2,4,28,1,CORE_SEG7S}, {0}
 };
-const struct core_dispLayout s11_dispS11a[] = {
+core_tLCDLayout s11_dispS11a[] = {
   DISP_SEG_7(0,0,CORE_SEG16),DISP_SEG_7(0,1,CORE_SEG16),
   DISP_SEG_7(1,0,CORE_SEG8), DISP_SEG_7(1,1,CORE_SEG8) ,{0}
 };
-const struct core_dispLayout s11_dispS11b2[] = {
+core_tLCDLayout s11_dispS11b2[] = {
   DISP_SEG_16(0,CORE_SEG16),DISP_SEG_16(1,CORE_SEG16),{0}
 };
 
@@ -84,7 +84,7 @@ static struct {
   int    ac_select, ac_state;
 #endif
   int    digSel;
-  int    diagnosticLed;
+  UINT8  diagnosticLed;
   int    swCol;
   int    ssEn;		  /* Enable switched solenoids (solenoids that can be fired by a switch or a solenoid output) */
   int    switchedSol; /* Output state for switched solenoid (which may be enabled/disabled by ssEn), usually slingshots, bumpers,... */
@@ -382,7 +382,7 @@ static WRITE_HANDLER(pia2a_w) {
     core_write_pwm_output_8b(CORE_MODOUT_SEG0 + i, 0);
   locals.digSel = data & 0x0f;
   if (core_gameData->hw.display & S11_BCDDIAG)
-    locals.diagnosticLed |= core_bcd2seg[(data & 0x70)>>4];
+    locals.diagnosticLed |= core_bcd2seg7[(data & 0x70)>>4];
   else
     locals.diagnosticLed |= (data & 0x10)>>4;
 }
@@ -410,13 +410,13 @@ static WRITE_HANDLER(pia2b_w) {
     if (core_gameData->hw.display & S11_DISPINV) data = ~data;
     if (core_gameData->hw.display & S11_BCDDISP) {
       locals.segments[locals.digSel].w |=
-           locals.pseg[locals.digSel].w = core_bcd2seg[data&0x0f];
+           locals.pseg[locals.digSel].w = core_bcd2seg7[data&0x0f];
       locals.segments[20+locals.digSel].w |=
-           locals.pseg[20+locals.digSel].w = core_bcd2seg[data>>4];
-      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + locals.digSel * 16, core_bcd2seg[data & 0x0f]);
-      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + locals.digSel * 16 + 8, core_bcd2seg[data & 0x0f] >> 8);
-      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + (20 + locals.digSel) * 16, core_bcd2seg[data >> 4]);
-      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + (20 + locals.digSel) * 16 + 8, core_bcd2seg[data >> 4] >> 8);
+           locals.pseg[20+locals.digSel].w = core_bcd2seg7[data>>4];
+      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + locals.digSel * 16, core_bcd2seg7[data & 0x0f]);
+      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + locals.digSel * 16 + 8, core_bcd2seg7[data & 0x0f] >> 8);
+      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + (20 + locals.digSel) * 16, core_bcd2seg7[data >> 4]);
+      core_write_pwm_output_8b(CORE_MODOUT_SEG0 + (20 + locals.digSel) * 16 + 8, core_bcd2seg7[data >> 4] >> 8);
     }
     else
     {
@@ -874,12 +874,12 @@ static MACHINE_INIT(s11) {
   if (core_gameData->sxx.muxSol)
      core_set_pwm_output_type(CORE_MODOUT_SOL0 + core_gameData->sxx.muxSol - 1, 1, CORE_MODOUT_PULSE); // K1 mux relay
   coreGlobals.nAlphaSegs = 0;
-  const struct core_dispLayout* layout, * parent_layout;
+  core_tLCDLayout* layout, * parent_layout;
   for (layout = core_gameData->lcdLayout, parent_layout = NULL; layout->length || (parent_layout && parent_layout->length); layout += 1) {
      if (layout->length == 0) { layout = parent_layout; parent_layout = NULL; }
      switch (layout->type & CORE_SEGMASK)
      {
-     case CORE_IMPORT: assert(parent_layout == NULL); parent_layout = layout + 1; layout = layout->lptr - 1; break;
+     case CORE_IMPORT: assert(parent_layout == NULL); parent_layout = layout + 1; layout = layout->importedLayout - 1; break;
      case CORE_DMD: break;
      case CORE_VIDEO: break;
      default: if (coreGlobals.nAlphaSegs < (layout->start + layout->length) * 16) coreGlobals.nAlphaSegs = (layout->start + layout->length) * 16; break;

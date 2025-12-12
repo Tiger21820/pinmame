@@ -98,7 +98,7 @@ static READ_HANDLER(rom2_r) {
 
 /* display (16 digits) */
 static WRITE_HANDLER(rom1_w) {
-  locals.segments[15 - offset].w = core_bcd2seg[data];
+  locals.segments[15 - offset].w = core_bcd2seg7[data];
   // These next lines make up for a flaw in the rom code:
   // when you first make a 10 pt target in the game, and a
   // 1000 pt target thereafter, the 100s digit in between
@@ -106,9 +106,9 @@ static WRITE_HANDLER(rom1_w) {
   // on the prototype by wiring the segments accordingly;
   // maybe they also rewrote some of the code to fix it later on?
   if (locals.segments[2].w && !locals.segments[3].w)
-    locals.segments[3].w = core_bcd2seg[0];
+    locals.segments[3].w = core_bcd2seg7[0];
   if (locals.segments[9].w && !locals.segments[10].w)
-    locals.segments[10].w = core_bcd2seg[0];
+    locals.segments[10].w = core_bcd2seg7[0];
 }
 
 /* lamps (up to 64 are possible) */
@@ -119,7 +119,7 @@ static WRITE_HANDLER(rom2_w) {
   locals.solenoids = (locals.solenoids & 0x7fff) | (((locals.lampMatrix[0] & 0x05) == 0x05) << 15);
   // Display the "0" at the single match units.
   if (locals.lampMatrix[5] & 0x01)
-    locals.segments[16].w = core_bcd2seg[0];
+    locals.segments[16].w = core_bcd2seg7[0];
 }
 
 /* solenoids 1-15 & test switch reading */
@@ -292,7 +292,7 @@ INPUT_PORTS_START(flicker)
       COREPORT_DIPSET(0x8000, "1" )
 INPUT_PORTS_END
 
-core_tLCDLayout flicker_disp[] = {
+static core_tLCDLayout flicker_disp[] = {
   {0, 0, 0,6,CORE_SEG7}, {0,14, 7,6,CORE_SEG7},
   {3, 4,14,2,CORE_SEG7}, {3,12, 6,1,CORE_SEG7},
   {3,18,13,1,CORE_SEG7}, {3,20,16,1,CORE_SEG7}, {0}

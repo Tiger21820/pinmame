@@ -197,7 +197,7 @@
 #define CORE_SEGHIBIT 0x40
 #define CORE_SEGREV   0x80
 #define CORE_DMDNOAA  0x100
-#define CORE_NODISP   0x200
+#define CORE_NODISP   0x200 // VPinMAME only: if flag is set, the display is not included in VPinMAME window
 
 #define CORE_SEG8H    (CORE_SEG8  | CORE_SEGHIBIT)
 #define CORE_SEG7H    (CORE_SEG7  | CORE_SEGHIBIT)
@@ -220,9 +220,13 @@
    handles all kinds of displays so we call it dispLayout.
    Keep the typedef of core_tLCDLayout for some time. */
 struct core_dispLayout {
-  UINT16 top, left, start, length, type;
-  genf *fptr;
-  const struct core_dispLayout *lptr;	// for DISP_SEG_IMPORT(x) with flag CORE_IMPORT
+  const UINT16 top, left;                        // Internal renderer position
+  const UINT16 start;                            // For segment displays: start position in the display memory (in digits), For DMD/VIDEO: height of the display (in lines)
+  const UINT16 length;                           // For segment displays: number of digits, For DMD/VIDEO: width of the display (in pixels)
+  const UINT16 type;                             // Display type
+  genf* videoRenderer;                           // CORE_VIDEO renderer
+  struct core_dispLayout * const importedLayout; // CORE_IMPORT layout (see DISP_SEG_IMPORT)
+  int index;                                     // index of this layout in the overall layout list (evaluated when machine is started)
 };
 typedef struct core_dispLayout core_tLCDLayout, *core_ptLCDLayout;
 // Overall alphanumeric display layout. Used externally by VPinMame's dmddevice. Don't change order
@@ -248,8 +252,8 @@ typedef enum {
 } core_segOverallLayout_t;
 
 
-#define PINMAME_VIDEO_UPDATE(name) int (name)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout)
-typedef int (*ptPinMAMEvidUpdate)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout);
+#define PINMAME_VIDEO_UPDATE(name) int (name)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, core_tLCDLayout *layout)
+typedef int (*ptPinMAMEvidUpdate)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const core_tLCDLayout *layout);
 
 /*---------------------------------------
 / WPC driver constants
@@ -505,9 +509,6 @@ typedef struct {
   /*-- Alphanumeric driver --*/
   core_tSeg segments;                                           /* Segments data from driver */
   UINT16 drawSeg[CORE_SEGCOUNT];                                /* Segments drawn */
-  /*-- DMD --*/
-  UINT8 dmdDotRaw[DMD_MAXY * DMD_MAXX];                         /* DMD: 'raw' dots, that is to say frame built up from rasterized frames (depends on each driver), stable result that can be used for post processing (colorization, ...) */
-  float dmdDotLum[DMD_MAXY * DMD_MAXX];                         /* DMD: perceived linear luminance computed from PWM frames, for rendering (result may change and can't be considered as stable) */
   /*-- Solenoids --*/
   volatile UINT32 pulsedSolState;                               /* Current pulse binary value of solenoids on driver board */
   volatile UINT32 solenoids;                                    /* Current integrated binary On/Off value of solenoids on driver board (not pulsed, averaged over a period depending on the driver) */
@@ -539,9 +540,9 @@ extern volatile struct pinMachine *coreData;
 /*-- so I have to invent some by myself. Each driver --*/
 /*-- fills in one of these in the game_init function --*/
 typedef struct {
-  UINT64  gen;                /* Hardware Generation */
-  const struct core_dispLayout *lcdLayout; /* LCD display layout */
-  struct {
+  const UINT64  gen;                /* Hardware Generation */
+  core_tLCDLayout *lcdLayout;       /* LCD display layout */
+  const struct {
     UINT32  flippers;      /* flippers installed (see defines below) */
     int     swCol, lampCol, custSol; /* Custom switch columns, lamp columns and solenoids */
     UINT32  soundBoard, display;
@@ -557,13 +558,13 @@ typedef struct {
 #endif
   } hw;
   const void *simData;
-  struct { /* WPC specific stuff */
+  const struct { /* WPC specific stuff */
     char serialNo[21];  /* Security chip serial number */
     UINT8 invSw[CORE_MAXSWCOL]; /* inverted switches (e.g. optos) */
     /* common switches */
     struct { int start, tilt, sTilt, coinDoor, shooter; } comSw;
   } wpc;
-  struct { /* S3-S11 specific stuff (incl DE) */
+  const struct { /* S3-S11 specific stuff (incl DE) */
     int muxSol;  /* S11 Mux solenoid */
     int ssSw[8]; /* Special solenoid switches */
   } sxx;
@@ -571,14 +572,13 @@ typedef struct {
 } core_tGameData;
 extern const core_tGameData *core_gameData;
 
-extern const int core_bcd2seg9[];  /* BCD to 9 segment display */
-extern const int core_bcd2seg9a[]; /* BCD to 9 segment display, missing 6 top line */
-extern const int core_bcd2seg7[];  /* BCD to 7 segment display */
-extern const int core_bcd2seg7a[]; /* BCD to 7 segment display, missing 6 top line */
-extern const int core_bcd2seg7e[]; /* BCD to 7 segment display with A to E letters */
+extern const UINT16 core_bcd2seg9[];     /* BCD to 9 segment display */
+extern const UINT16 core_bcd2seg9a[];    /* BCD to 9 segment display, missing 6 top line */
+extern const UINT16 core_bcd2seg7[];     /* BCD to 7 segment display */
+extern const UINT8  core_bcd2seg7a[];    /* BCD to 7 segment display, missing 6 top line */
+extern const UINT8  core_bcd2seg7e[];    /* BCD to 7 segment display with A to E letters */
 extern const UINT16 core_ascii2seg16[];  /* BCD to regular 16 segment display */
 extern const UINT16 core_ascii2seg16s[]; /* BCD to 16 segment display with split top / bottom lines */
-#define core_bcd2seg  core_bcd2seg7
 
 /*-- Exported Display handling functions--*/
 void core_updateSw(int flipEn);
@@ -622,53 +622,35 @@ extern void core_write_masked_pwm_output_8b(int startIndex, UINT8 bitStates, UIN
 extern void core_write_pwm_output_lamp_matrix(int startIndex, UINT8 columns, UINT8 rows, int nCols);
 INLINE void core_zero_cross(void) { coreGlobals.lastACPositiveZeroCrossTimeStamp = timer_get_time(); }
 
-/*-- DMD PWM integration --*/
-typedef struct {
-  // Definition initialized at startup using 'core_dmd_pwm_init' then unmutable
-  int     width;              // DMD width
-  int     height;             // DMD height
-  int     revByte;            // Is bitset reversed ?
-  int     frameSize;          // Size of a DMD frame in bytes (width * height)
-  int     rawFrameSize;       // Size of a raw DMD frame in bytes (width * height / 8)
-  int     nFrames;            // Number of frames to store and consider to create shades (depends on hardware refresh frequency and used PWM patterns)
-  int     raw_combiner;       // CORE_DMD_PWM_COMBINER_... enum that defines how to combine bitplanes to create multi plane raw frame for colorization plugin
-  int     fir_size;           // Selected filter (depends on hardware refresh frequency and number of stored frames)
-  const UINT32* fir_weights;  // Selected filter (depends on hardware refresh frequency and number of stored frames)
-  float   fir_sum;            // Sum of filter weights
-  // Data acquisition, feeded by the driver through 'core_dmd_submit_frame'
-  UINT8*  rawFrames;          // Buffer for incoming raw frames
-  int     nextFrame;          // Position in circular buffer to store next raw frame
-  UINT32* shadedFrame;        // Shaded frame computed from raw frames
-  unsigned int frame_index;   // Raw frame index
-  // Integrated data, computed by 'core_dmd_update_pwm'
-  UINT8*  bitplaneFrame;      // DMD: bitplane frame built up from raw rasterized frames (depends on each driver, stable result that can be used for post processing like colorization, ...)
-  float*  luminanceFrame;     // DMD: linear luminance computed from PWM frames, for rendering (result may change and can't be considered as stable across PinMame builds)
-} core_tDMDPWMState;
+#define CORE_DMD_PWM_FILTER_DE_128x16            0
+#define CORE_DMD_PWM_FILTER_DE_128x32            1
+#define CORE_DMD_PWM_FILTER_DE_192x64            2
+#define CORE_DMD_PWM_FILTER_GTS3                 3
+#define CORE_DMD_PWM_FILTER_WPC                  4
+#define CORE_DMD_PWM_FILTER_WPC_PH               5
+#define CORE_DMD_PWM_FILTER_ALVG1                6
+#define CORE_DMD_PWM_FILTER_ALVG2                7
+#define CORE_DMD_PWM_FILTER_CAPCOM_128x32        8
+#define CORE_DMD_PWM_FILTER_CAPCOM_256x64        9
 
-#define CORE_DMD_PWM_FILTER_DE_128x16     0
-#define CORE_DMD_PWM_FILTER_DE_128x32     1
-#define CORE_DMD_PWM_FILTER_DE_192x64     2
-#define CORE_DMD_PWM_FILTER_GTS3          3
-#define CORE_DMD_PWM_FILTER_WPC           4
-#define CORE_DMD_PWM_FILTER_WPC_PH        5
-#define CORE_DMD_PWM_FILTER_ALVG1         6
-#define CORE_DMD_PWM_FILTER_ALVG2         7
-#define CORE_DMD_PWM_FILTER_CAPCOM_128x32 8
-#define CORE_DMD_PWM_FILTER_CAPCOM_256x64 9
+#define CORE_DMD_PWM_COMBINER_GTS3_4C_A          0
+#define CORE_DMD_PWM_COMBINER_GTS3_4C_B          1
+#define CORE_DMD_PWM_COMBINER_GTS3_5C            2
+#define CORE_DMD_PWM_COMBINER_SUM_2              3
+#define CORE_DMD_PWM_COMBINER_SUM_3              4
+#define CORE_DMD_PWM_COMBINER_SUM_2_1            5
+#define CORE_DMD_PWM_COMBINER_SUM_1_2            6
+#define CORE_DMD_PWM_COMBINER_SUM_4              7
+#define CORE_DMD_PWM_COMBINER_SUM_1_2_1          8
+#define CORE_DMD_PWM_COMBINER_1                  9
 
-#define CORE_DMD_PWM_COMBINER_GTS3_4C_A 0
-#define CORE_DMD_PWM_COMBINER_GTS3_4C_B 1
-#define CORE_DMD_PWM_COMBINER_GTS3_5C   2
-#define CORE_DMD_PWM_COMBINER_SUM_2     3
-#define CORE_DMD_PWM_COMBINER_SUM_3     4
-#define CORE_DMD_PWM_COMBINER_SUM_2_1   5
-#define CORE_DMD_PWM_COMBINER_SUM_1_2   6
-#define CORE_DMD_PWM_COMBINER_SUM_4     7
+#define CORE_DMD_PWM_PREINTEGRATED_LINEAR_4  0x100
+#define CORE_DMD_PWM_PREINTEGRATED_SAM       0x101
 
-extern void core_dmd_pwm_init(core_tDMDPWMState* dmd_state, const int width, const int height, const int filter, const int raw_combiner);
-extern void core_dmd_pwm_exit(core_tDMDPWMState* dmd_state);
-extern void core_dmd_submit_frame(core_tDMDPWMState* dmd_state, const UINT8* frame, const int ntimes);
-extern void core_dmd_video_update(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const struct core_dispLayout *layout, core_tDMDPWMState* dmd_state);
+extern void core_dmd_pwm_init(const core_tLCDLayout* layout, const int filter, const int raw_combiner, const int isReversedByte);
+extern void core_dmd_submit_frame(const core_tLCDLayout* layout, const UINT8* frame, const int ntimes);
+extern void core_dmd_update_identify(const core_tLCDLayout* layout, UINT8* bitplaneFrame);
+extern void core_dmd_update_pwm(const core_tLCDLayout* layout, UINT32* dmdFIRBuffer, float* luminanceFrame);
 
 extern void core_sound_throttle_adj(int sIn, int *sOut, int buffersize, double samplerate);
 
@@ -690,17 +672,25 @@ INLINE UINT8 core_revbyte(UINT8 x) { return (core_swapNyb[x & 0xf] << 4) | (core
 //  Get the status of a DIP bank (8 dips)
 extern int core_getDip(int dipBank);
 
-/*-- Easy Bit Column to Number conversion
- *   Convert Bit Column Data to corresponding #, ie, if Bit 3=1, return 3 - Zero Based (Bit1=1 returns 0)
- *   Assumes only 1 bit is set at a time. --*/
-INLINE int core_BitColToNum(int tmp)
+// Compute index of the first trailing set bit (0 based)
+// 0x0001 returns 0, 0x0040 returns 6, note 0x0000 returns 0
+// (so implicitly assumes that only 1 bit should be set at a time)
+INLINE unsigned int core_BitColToNum(unsigned int n)
 {
-	int data=0, i=0;
-	do {
-		if (tmp & 1) data += i;
-		i++;
-	} while (tmp >>= 1);
-	return data;
+   if (n == 0) return 0;
+#ifdef _MSC_VER
+#if (defined(_M_ARM) || defined(_M_ARM64))
+   return _CountTrailingZeros(n);
+#else
+   return _tzcnt_u32(n); // counts trailing zeros
+#endif
+#else
+   return __builtin_ctz(n);
+#endif
 }
+
+//
+INLINE int core_lowToHigh(UINT8 prev, UINT8 state, UINT8 mask) { return ~prev & state & mask; }
+INLINE int core_highToLow(UINT8 prev, UINT8 state, UINT8 mask) { return prev & ~state & mask; }
 
 extern MACHINE_DRIVER_EXTERN(PinMAME);
