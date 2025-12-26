@@ -29,7 +29,7 @@
 
   #define NORMALREGION(size, reg)  ROM_REGION(size, reg, 0)
   #define NORMALREGIONE(size, reg) ROM_REGION(size, reg, ROMREGION_ERASE)
-  #define SOUNDREGION(size ,reg)   ROM_REGION(size, reg, ROMREGION_SOUNDONLY)
+  #define SOUNDREGION(size, reg)   ROM_REGION(size, reg, ROMREGION_SOUNDONLY)
   #define SOUNDREGIONE(size ,reg)  ROM_REGION(size, reg, ROMREGION_SOUNDONLY|ROMREGION_ERASE)
 
 /*-- convenience macro for handling bits --*/
@@ -51,6 +51,8 @@
 #  define CORE_SCREENX 320
 #  define CORE_SCREENY 256
 #endif /* VPINMAME */
+#define CORE_SCREENX_INC 4 // hack: increases window width by 4 for alpha/segmented displays, otherwise there is some weird wrap of last segments
+
 /*-----------------
 /  define the game
 /------------------*/
@@ -68,7 +70,7 @@
 /*--------------
 /  Input ports
 /---------------*/
-/* strange but there are no way to define IMP and TOG with key without using BITX */
+/* strange but there is no way to define IMP and TOG with key without using BITX */
 #define COREPORT_BIT(mask, name, key) \
    PORT_BITX(mask,IP_ACTIVE_HIGH,IPT_BUTTON1,name,key,IP_JOY_NONE)
 #define COREPORT_BITIMP(mask, name, key) \
@@ -194,10 +196,11 @@
 #define CORE_IMPORT   0x20 // Link to another display layout
 #define CORE_SEGMASK  0x3f // Note that CORE_IMPORT must be part of the segmask as well!
 
-#define CORE_SEGHIBIT 0x40
-#define CORE_SEGREV   0x80
-#define CORE_DMDNOAA  0x100
-#define CORE_NODISP   0x200 // VPinMAME only: if flag is set, the display is not included in VPinMAME window
+#define CORE_SEGHIBIT     0x040
+#define CORE_SEGREV       0x080
+#define CORE_DMDNOAA      0x100
+#define CORE_NODISP       0x200 // VPinMAME only: if flag is set, the display is not included in VPinMAME window
+#define CORE_VIDEO_ROT90  0x400 // Video is rotated 90 degrees
 
 #define CORE_SEG8H    (CORE_SEG8  | CORE_SEGHIBIT)
 #define CORE_SEG7H    (CORE_SEG7  | CORE_SEGHIBIT)
@@ -252,7 +255,7 @@ typedef enum {
 } core_segOverallLayout_t;
 
 
-#define PINMAME_VIDEO_UPDATE(name) int (name)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, core_tLCDLayout *layout)
+#define PINMAME_VIDEO_UPDATE(name) void (name)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, core_tLCDLayout *layout)
 typedef int (*ptPinMAMEvidUpdate)(struct mame_bitmap *bitmap, const struct rectangle *cliprect, const core_tLCDLayout *layout);
 
 /*---------------------------------------
@@ -649,8 +652,8 @@ INLINE void core_zero_cross(void) { coreGlobals.lastACPositiveZeroCrossTimeStamp
 
 extern void core_dmd_pwm_init(const core_tLCDLayout* layout, const int filter, const int raw_combiner, const int isReversedByte);
 extern void core_dmd_submit_frame(const core_tLCDLayout* layout, const UINT8* frame, const int ntimes);
-extern void core_dmd_update_identify(const core_tLCDLayout* layout, UINT8* bitplaneFrame);
-extern void core_dmd_update_pwm(const core_tLCDLayout* layout, UINT32* dmdFIRBuffer, float* luminanceFrame);
+extern UINT8* core_dmd_update_identify(const core_tLCDLayout* layout, unsigned int * rawFrameId);
+extern float* core_dmd_update_pwm(const core_tLCDLayout* layout, unsigned int* lumFrameId);
 
 extern void core_sound_throttle_adj(int sIn, int *sOut, int buffersize, double samplerate);
 
@@ -672,17 +675,34 @@ INLINE UINT8 core_revbyte(UINT8 x) { return (core_swapNyb[x & 0xf] << 4) | (core
 //  Get the status of a DIP bank (8 dips)
 extern int core_getDip(int dipBank);
 
+INLINE int singleBitSet(unsigned int b)
+{
+   return (b!=0) && ((b & (b-1))==0);
+}
+
+#if defined(__MINGW32__) && !defined(__builtin_ctz) // to fix minGW issue
+INLINE int __builtin_ctz(const unsigned int n)
+{
+   for (int i = 0; i < 32; ++i)
+      if (n & (1u << i))
+         return i;
+   return 32; // for n == 0
+}
+#endif
+
 // Compute index of the first trailing set bit (0 based)
 // 0x0001 returns 0, 0x0040 returns 6, note 0x0000 returns 0
 // (so implicitly assumes that only 1 bit should be set at a time)
 INLINE unsigned int core_BitColToNum(unsigned int n)
 {
    if (n == 0) return 0;
+   assert(singleBitSet(n));
+   // count trailing zeros
 #ifdef _MSC_VER
 #if (defined(_M_ARM) || defined(_M_ARM64))
    return _CountTrailingZeros(n);
 #else
-   return _tzcnt_u32(n); // counts trailing zeros
+   return _tzcnt_u32(n);
 #endif
 #else
    return __builtin_ctz(n);

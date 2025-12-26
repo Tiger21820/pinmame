@@ -153,6 +153,68 @@
 #define SSE2NEON_PRECISE_DP (0)
 #endif
 
+/* SSE2NEON_UNDEFINED_ZERO
+ * Affects: _mm_undefined_ps, _mm_undefined_si128, _mm_undefined_pd
+ *
+ * Issue: These intrinsics return vectors with "undefined" contents per Intel
+ *        spec. On x86, this means truly uninitialized memory (garbage values).
+ *
+ * MSVC Semantic Drift: MSVC on ARM forces zero-initialization for these
+ *        intrinsics, which differs from x86 behavior where garbage is returned.
+ *        GCC/Clang on ARM match x86 by returning uninitialized memory.
+ *
+ * This macro provides explicit control over the behavior:
+ *   Default (0): Compiler-dependent (MSVC=zero, GCC/Clang=undefined)
+ *   Enabled (1): Force zero-initialization on all compilers (safer, portable)
+ *
+ * When to enable:
+ *   - Deterministic behavior across compilers is required
+ *   - Debugging memory-related issues where undefined values cause problems
+ *   - Security-sensitive code where uninitialized memory is a concern
+ *
+ * Note: Using undefined values without first writing to them is undefined
+ * behavior. Well-formed code should not depend on either behavior.
+ */
+#ifndef SSE2NEON_UNDEFINED_ZERO
+#define SSE2NEON_UNDEFINED_ZERO (0)
+#endif
+
+/* SSE2NEON_MWAIT_POLICY
+ * Affects: _mm_mwait
+ *
+ * Issue: x86 MONITOR/MWAIT allows a thread to sleep until a write occurs to a
+ *        monitored address range. ARM has no userspace equivalent for address-
+ *        range monitoring. _mm_monitor is a no-op; _mm_mwait can only provide
+ *        low-power wait hints without true "wake on store" semantics.
+ *
+ * Note: The x86 extensions/hints parameters (C-state hints) are ignored on ARM
+ *       as there is no architectural equivalent. No memory ordering is provided
+ *       beyond what the hint instruction itself offers.
+ *
+ * WARNING: Policies 1 and 2 (WFE/WFI) may cause issues:
+ *   - WFE: May sleep until event/interrupt; can wake spuriously. Always check
+ *          your condition in a loop. May trap in EL0 (SCTLR_EL1.nTWE).
+ *   - WFI: May trap (SIGILL) in EL0 on Linux, iOS, macOS (SCTLR_EL1.nTWI).
+ *   - Neither provides "wake on address write" semantics.
+ *
+ * Policy values:
+ *   0 (default): yield - Safe everywhere, never blocks, just a hint
+ *   1:           wfe   - Event wait, may sleep until event/interrupt
+ *   2:           wfi   - Interrupt wait, may trap in EL0 on many platforms
+ *
+ * Recommended usage:
+ *   - Policy 0: General-purpose code, spin-wait loops (safe default)
+ *   - Policy 1: Only if you control both reader/writer and use SEV/SEVL
+ *   - Policy 2: Only for bare-metal or kernel code with known OS support
+ *
+ * Migration note: Code relying on x86 MONITOR/MWAIT for lock-free waiting
+ * should migrate to proper atomics + OS wait primitives (futex, condition
+ * variables) for correct cross-platform behavior.
+ */
+#ifndef SSE2NEON_MWAIT_POLICY
+#define SSE2NEON_MWAIT_POLICY (0)
+#endif
+
 /* Enable inclusion of windows.h on MSVC platforms
  * This makes _mm_clflush functional on windows, as there is no builtin.
  */
@@ -232,6 +294,65 @@
 #define SSE2NEON_ARCH_AARCH64 0
 #endif
 
+/* ARM64EC Support - EXPERIMENTAL with known limitations
+ *
+ * ARM64EC is Microsoft's hybrid ABI bridging x64 and ARM64 within a single
+ * Windows process, enabling incremental migration of x64 applications to ARM64.
+ * Compiler support remains incomplete (limited LLVM/GCC coverage).
+ *
+ * Compiler behavior:
+ * - MSVC defines both _M_AMD64 and _M_ARM64EC (but NOT _M_ARM64)
+ * - Requires arm64_neon.h instead of arm_neon.h
+ *
+ * Known limitations:
+ * 1. Windows headers: SSE2NEON_INCLUDE_WINDOWS_H must be 0 (default).
+ *    Include sse2neon.h BEFORE any Windows headers to avoid type conflicts.
+ * 2. Include order: sse2neon.h must be included BEFORE <intrin.h> or any C++
+ *    standard headers that pull it in (e.g., <cmath>, <algorithm>).
+ * 3. ABI boundary: __m128/SSE types must NOT cross x64/ARM64EC module
+ *    boundaries (exports/imports) as layouts differ between ABIs.
+ *    Users needing cross-ABI SIMD interop should use MSVC's softintrin.
+ * 4. CRC32 hardware intrinsics are disabled; software fallback is used.
+ *
+ * SSE2NEON_ARM64EC is 1 when compiling for ARM64EC with MSVC, 0 otherwise.
+ * Note: clang-cl ARM64EC builds are not currently detected by this macro.
+ *
+ * Recommendation: Use native ARM64 compilation when possible.
+ */
+#if SSE2NEON_COMPILER_MSVC && defined(_M_ARM64EC)
+#define SSE2NEON_ARM64EC 1
+#else
+#define SSE2NEON_ARM64EC 0
+#endif
+
+/* Early ARM64EC + SSE2NEON_INCLUDE_WINDOWS_H check.
+ * This must come BEFORE any standard includes because <intrin.h> and other
+ * headers can trigger winnt.h, which fails with "Must define a target
+ * architecture" on ARM64EC before we could emit our own error.
+ */
+#if SSE2NEON_ARM64EC && SSE2NEON_INCLUDE_WINDOWS_H
+#error \
+    "SSE2NEON_INCLUDE_WINDOWS_H=1 is not supported on ARM64EC. " \
+    "Include <windows.h> separately AFTER sse2neon.h instead."
+#endif
+
+/* Endianness check
+ *
+ * SSE2NEON assumes little-endian byte ordering for lane-to-memory mappings.
+ * Big-endian ARM targets would produce silently incorrect results because
+ * SSE intrinsics define lane ordering relative to little-endian memory layout.
+ *
+ * GCC/Clang define __BYTE_ORDER__. For compilers that don't (e.g., MSVC),
+ * we check for explicit big-endian ARM macros. MSVC only targets little-endian
+ * ARM, so no additional check is needed there.
+ */
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
+#error "sse2neon requires little-endian target; big-endian is not supported"
+#elif defined(__ARMEB__) || defined(__AARCH64EB__) || \
+    defined(__BIG_ENDIAN__) || defined(_BIG_ENDIAN)
+#error "sse2neon requires little-endian target; big-endian is not supported"
+#endif
+
 /* compiler specific definitions */
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma push_macro("FORCE_INLINE")
@@ -271,6 +392,28 @@
 #define _sse2neon_const_cast(t, e) ((t) (e))
 #endif
 
+/* ARM64EC winnt.h workaround: define architecture macros before any headers
+ * that might include winnt.h. Windows SDK 10.0.26100.0+ requires _ARM64EC_ or
+ * _ARM64_ but MSVC 17.x only defines _M_ARM64EC.
+ */
+#if SSE2NEON_ARM64EC
+/* Warn if winnt.h was already included - the workaround won't help */
+#ifdef _WINNT_
+#pragma message( \
+    "warning: sse2neon.h included after winnt.h; ARM64EC workaround may fail")
+#endif
+/* Define _ARM64EC_ for winnt.h architecture check (kept for user detection) */
+#if !defined(_ARM64EC_)
+#define _ARM64EC_ 1
+#define _SSE2NEON_DEFINED_ARM64EC_
+#endif
+/* Define _M_ARM64 temporarily for headers that derive _ARM64_ from it */
+#if !defined(_M_ARM64)
+#define _M_ARM64 1
+#define _SSE2NEON_DEFINED_M_ARM64
+#endif
+#endif /* SSE2NEON_ARM64EC */
+
 #include <fenv.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -299,13 +442,52 @@ FORCE_INLINE int64_t sse2neon_recast_f64_s64(double val)
 
 /* If using MSVC */
 #if SSE2NEON_COMPILER_MSVC
-#if defined(_M_ARM64EC)
-#define _DISABLE_SOFTINTRIN_ 1
+
+/* ARM64EC SSE header blocking: pre-define include guards to prevent MSVC SSE
+ * headers (mmintrin.h, xmmintrin.h, etc.) and Windows SDK softintrin.h from
+ * loading, as their __m128 union types conflict with sse2neon's NEON types.
+ */
+#if SSE2NEON_ARM64EC || defined(_M_ARM64EC)
+/* Detect if <intrin.h> was already included - SSE types may have leaked.
+ * Check both _INTRIN_H_ and _INTRIN_H to cover different MSVC versions. */
+#if defined(_INTRIN_H_) || defined(_INTRIN_H)
+#error \
+    "sse2neon.h must be included BEFORE <intrin.h> or C++ headers on ARM64EC. " \
+    "SSE type definitions from <intrin.h> conflict with sse2neon's NEON types."
 #endif
+#define _INCLUDED_MM2
+#define _MMINTRIN_H_INCLUDED
+#define _XMMINTRIN_H_INCLUDED
+#define _EMMINTRIN_H_INCLUDED
+#define _PMMINTRIN_H_INCLUDED
+#define _TMMINTRIN_H_INCLUDED
+#define _SMMINTRIN_H_INCLUDED
+#define _NMMINTRIN_H_INCLUDED
+#define _WMMINTRIN_H_INCLUDED
+#define _IMMINTRIN_H_INCLUDED
+#define _ZMMINTRIN_H_INCLUDED
+#define _AMMINTRIN_H_INCLUDED
+/* Block Windows SDK softintrin */
+#define _SOFTINTRIN_H_
+#define _DISABLE_SOFTINTRIN_ 1
+#endif /* SSE2NEON_ARM64EC */
 #include <intrin.h>
+
+/* Windows headers inclusion.
+ * ARM64EC case is blocked by early check near SSE2NEON_ARM64EC definition.
+ */
 #if SSE2NEON_INCLUDE_WINDOWS_H
 #include <processthreadsapi.h>
 #include <windows.h>
+#endif
+
+/* Clean up _M_ARM64 (could mislead into pure ARM64 paths). Keep _ARM64EC_. */
+#ifdef _SSE2NEON_DEFINED_ARM64EC_
+#undef _SSE2NEON_DEFINED_ARM64EC_
+#endif
+#ifdef _SSE2NEON_DEFINED_M_ARM64
+#undef _M_ARM64
+#undef _SSE2NEON_DEFINED_M_ARM64
 #endif
 
 #if !defined(__cplusplus)
@@ -316,11 +498,12 @@ FORCE_INLINE int64_t sse2neon_recast_f64_s64(double val)
 #include <malloc.h>
 #endif
 
-#if (defined(_M_AMD64) || defined(__x86_64__)) || \
-    (defined(_M_ARM64) || defined(_M_ARM64EC) || defined(__arm64__))
+/* 64-bit bit scanning available on x64 and AArch64 (including ARM64EC) */
+#if (defined(_M_AMD64) || defined(__x86_64__)) || SSE2NEON_ARCH_AARCH64
 #define SSE2NEON_HAS_BITSCAN64
 #endif
-#endif
+
+#endif /* SSE2NEON_COMPILER_MSVC */
 
 /* MinGW uses _aligned_malloc/_aligned_free from <malloc.h> */
 #if defined(__MINGW32__)
@@ -422,12 +605,23 @@ FORCE_INLINE void _sse2neon_smp_mb(void)
 #endif
 #endif
 
+/* ARM64EC: use arm64_neon.h (arm_neon.h guards with _M_ARM||_M_ARM64) */
+#if SSE2NEON_ARM64EC || defined(_M_ARM64EC)
+#include <arm64_neon.h>
+#else
 #include <arm_neon.h>
+#endif
+
 /* Include ACLE for CRC32 and other intrinsics on ARMv8+ */
 #if SSE2NEON_ARCH_AARCH64 || __ARM_ARCH >= 8
 #if defined __has_include && __has_include(<arm_acle.h>)
 #include <arm_acle.h>
+#define SSE2NEON_HAS_ACLE 1
+#else
+#define SSE2NEON_HAS_ACLE 0
 #endif
+#else
+#define SSE2NEON_HAS_ACLE 0
 #endif
 
 /* Apple Silicon cache lines are double of what is commonly used by Intel, AMD
@@ -476,8 +670,10 @@ FORCE_INLINE void _sse2neon_smp_mb(void)
  * argument "a" of mm_shuffle_ps that will be places in fp1 of result.
  * fp0 is the same for fp0 of result.
  */
+#ifndef _MM_SHUFFLE
 #define _MM_SHUFFLE(fp3, fp2, fp1, fp0) \
     (((fp3) << 6) | ((fp2) << 4) | ((fp1) << 2) | ((fp0)))
+#endif
 
 /**
  * MACRO for shuffle parameter for _mm_shuffle_pd().
@@ -486,7 +682,9 @@ FORCE_INLINE void _sse2neon_smp_mb(void)
  * fp0 is a digit[01] that represents the fp from argument "a" of mm_shuffle_pd
  * that will be placed in fp0 of result.
  */
+#ifndef _MM_SHUFFLE2
 #define _MM_SHUFFLE2(fp1, fp0) (((fp1) << 1) | (fp0))
+#endif
 
 #if __has_builtin(__builtin_shufflevector)
 #define _sse2neon_shuffle(type, a, b, ...) \
@@ -516,25 +714,183 @@ FORCE_INLINE void _sse2neon_smp_mb(void)
 #define _MM_FROUND_CUR_DIRECTION 0x04
 #define _MM_FROUND_NO_EXC 0x08
 #define _MM_FROUND_RAISE_EXC 0x00
+#ifndef _MM_FROUND_NINT
 #define _MM_FROUND_NINT (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_RAISE_EXC)
+#endif
+#ifndef _MM_FROUND_FLOOR
 #define _MM_FROUND_FLOOR (_MM_FROUND_TO_NEG_INF | _MM_FROUND_RAISE_EXC)
+#endif
+#ifndef _MM_FROUND_CEIL
 #define _MM_FROUND_CEIL (_MM_FROUND_TO_POS_INF | _MM_FROUND_RAISE_EXC)
+#endif
+#ifndef _MM_FROUND_TRUNC
 #define _MM_FROUND_TRUNC (_MM_FROUND_TO_ZERO | _MM_FROUND_RAISE_EXC)
+#endif
+#ifndef _MM_FROUND_RINT
 #define _MM_FROUND_RINT (_MM_FROUND_CUR_DIRECTION | _MM_FROUND_RAISE_EXC)
+#endif
+#ifndef _MM_FROUND_NEARBYINT
 #define _MM_FROUND_NEARBYINT (_MM_FROUND_CUR_DIRECTION | _MM_FROUND_NO_EXC)
+#endif
+#ifndef _MM_ROUND_NEAREST
 #define _MM_ROUND_NEAREST 0x0000
+#endif
+#ifndef _MM_ROUND_DOWN
 #define _MM_ROUND_DOWN 0x2000
+#endif
+#ifndef _MM_ROUND_UP
 #define _MM_ROUND_UP 0x4000
+#endif
+#ifndef _MM_ROUND_TOWARD_ZERO
 #define _MM_ROUND_TOWARD_ZERO 0x6000
+#endif
+#ifndef _MM_ROUND_MASK
 #define _MM_ROUND_MASK 0x6000
-/* Flush zero mode macros. */
+#endif
+/* Flush-to-zero (FTZ) mode macros.
+ * On x86, FTZ (MXCSR bit 15) flushes denormal outputs to zero.
+ * On ARM, FPCR/FPSCR bit 24 provides unified FZ+DAZ behavior.
+ * ARMv7 NEON: Per ARM ARM, Advanced SIMD has "Flush-to-zero mode always
+ *   enabled" - denormals flush regardless of FPSCR.FZ (some impls may vary).
+ * ARMv8: FPCR.FZ correctly controls denormal handling for NEON ops.
+ */
+#ifndef _MM_FLUSH_ZERO_MASK
 #define _MM_FLUSH_ZERO_MASK 0x8000
+#endif
+#ifndef _MM_FLUSH_ZERO_ON
 #define _MM_FLUSH_ZERO_ON 0x8000
+#endif
+#ifndef _MM_FLUSH_ZERO_OFF
 #define _MM_FLUSH_ZERO_OFF 0x0000
-/* Denormals are zeros mode macros. */
+#endif
+/* Denormals-are-zero (DAZ) mode macros.
+ * On x86, DAZ (MXCSR bit 6) treats denormal inputs as zero.
+ * On ARM, setting DAZ enables the same FPCR/FPSCR bit 24 as FTZ,
+ * providing unified handling for both input and output denormals.
+ */
+#ifndef _MM_DENORMALS_ZERO_MASK
 #define _MM_DENORMALS_ZERO_MASK 0x0040
+#endif
+#ifndef _MM_DENORMALS_ZERO_ON
 #define _MM_DENORMALS_ZERO_ON 0x0040
+#endif
+#ifndef _MM_DENORMALS_ZERO_OFF
 #define _MM_DENORMALS_ZERO_OFF 0x0000
+#endif
+
+/* MXCSR Exception Flags - NOT EMULATED
+ *
+ * SSE provides floating-point exception flags in the MXCSR register (bits 0-5)
+ * that are NOT emulated on ARM NEON. Code relying on _mm_getcsr() to detect
+ * floating-point exceptions will silently fail to detect them.
+ *
+ * MXCSR Exception Flag Layout (x86):
+ *   Bit 0 (IE): Invalid Operation Exception    - NOT EMULATED
+ *   Bit 1 (DE): Denormal Exception             - NOT EMULATED
+ *   Bit 2 (ZE): Divide-by-Zero Exception       - NOT EMULATED
+ *   Bit 3 (OE): Overflow Exception             - NOT EMULATED
+ *   Bit 4 (UE): Underflow Exception            - NOT EMULATED
+ *   Bit 5 (PE): Precision Exception            - NOT EMULATED
+ *
+ * MXCSR Exception Mask Layout (x86):
+ *   Bits 7-12: Exception masks (mask = suppress exception)  - NOT EMULATED
+ *
+ * Why Not Emulated:
+ * - ARM NEON does not set sticky exception flags like x86 SSE
+ * - ARM FPSR (Floating-Point Status Register) has different semantics
+ * - Emulating per-operation exception tracking would require wrapping every
+ *   floating-point intrinsic with software checks, severely impacting
+ * performance
+ * - Thread-local exception state tracking would add significant complexity
+ *
+ * Impact:
+ * - Scientific computing code checking for overflow/underflow will miss events
+ * - Financial applications validating precision will not detect precision loss
+ * - Numerical code checking for invalid operations (NaN generation) won't
+ * detect them
+ *
+ * Workarounds:
+ * - Use explicit NaN/Inf checks after critical operations: isnan(), isinf()
+ * - Implement application-level range validation for overflow detection
+ * - Use higher precision arithmetic where precision loss is critical
+ *
+ * The macros below are defined for API compatibility but provide no
+ * functionality.
+ */
+
+/* Exception flag macros (MXCSR bits 0-5) - defined for API compatibility only
+ */
+#ifndef _MM_EXCEPT_INVALID
+#define _MM_EXCEPT_INVALID 0x0001
+#endif
+#ifndef _MM_EXCEPT_DENORM
+#define _MM_EXCEPT_DENORM 0x0002
+#endif
+#ifndef _MM_EXCEPT_DIV_ZERO
+#define _MM_EXCEPT_DIV_ZERO 0x0004
+#endif
+#ifndef _MM_EXCEPT_OVERFLOW
+#define _MM_EXCEPT_OVERFLOW 0x0008
+#endif
+#ifndef _MM_EXCEPT_UNDERFLOW
+#define _MM_EXCEPT_UNDERFLOW 0x0010
+#endif
+#ifndef _MM_EXCEPT_INEXACT
+#define _MM_EXCEPT_INEXACT 0x0020
+#endif
+#ifndef _MM_EXCEPT_MASK
+#define _MM_EXCEPT_MASK                                             \
+    (_MM_EXCEPT_INVALID | _MM_EXCEPT_DENORM | _MM_EXCEPT_DIV_ZERO | \
+     _MM_EXCEPT_OVERFLOW | _MM_EXCEPT_UNDERFLOW | _MM_EXCEPT_INEXACT)
+#endif
+
+/* Exception mask macros (MXCSR bits 7-12) - defined for API compatibility only
+ */
+#ifndef _MM_MASK_INVALID
+#define _MM_MASK_INVALID 0x0080
+#endif
+#ifndef _MM_MASK_DENORM
+#define _MM_MASK_DENORM 0x0100
+#endif
+#ifndef _MM_MASK_DIV_ZERO
+#define _MM_MASK_DIV_ZERO 0x0200
+#endif
+#ifndef _MM_MASK_OVERFLOW
+#define _MM_MASK_OVERFLOW 0x0400
+#endif
+#ifndef _MM_MASK_UNDERFLOW
+#define _MM_MASK_UNDERFLOW 0x0800
+#endif
+#ifndef _MM_MASK_INEXACT
+#define _MM_MASK_INEXACT 0x1000
+#endif
+#ifndef _MM_MASK_MASK
+#define _MM_MASK_MASK                                         \
+    (_MM_MASK_INVALID | _MM_MASK_DENORM | _MM_MASK_DIV_ZERO | \
+     _MM_MASK_OVERFLOW | _MM_MASK_UNDERFLOW | _MM_MASK_INEXACT)
+#endif
+
+/* Exception state accessor macros - silent stubs for API compatibility.
+ * These macros exist for API compatibility but provide NO functionality.
+ * On ARM, exception flags are never set by sse2neon intrinsics.
+ *
+ * _MM_GET_EXCEPTION_STATE() - Always returns 0 (no exceptions detected)
+ * _MM_SET_EXCEPTION_STATE() - Silently ignored (cannot clear nonexistent flags)
+ * _MM_GET_EXCEPTION_MASK()  - Always returns all-masked (0x1F80)
+ * _MM_SET_EXCEPTION_MASK()  - Silently ignored (no effect on ARM)
+ */
+#ifndef _MM_GET_EXCEPTION_STATE
+#define _MM_GET_EXCEPTION_STATE() (0)
+#endif
+#ifndef _MM_SET_EXCEPTION_STATE
+#define _MM_SET_EXCEPTION_STATE(x) ((void) (x))
+#endif
+#ifndef _MM_GET_EXCEPTION_MASK
+#define _MM_GET_EXCEPTION_MASK() (_MM_MASK_MASK)
+#endif
+#ifndef _MM_SET_EXCEPTION_MASK
+#define _MM_SET_EXCEPTION_MASK(x) ((void) (x))
+#endif
 
 /* Compile-time validation for immediate constant arguments.
  * This macro validates that:
@@ -850,6 +1206,27 @@ FORCE_INLINE int64_t _sse2neon_cvtf_s64(float v)
     return _sse2neon_static_cast(int64_t, v);
 }
 
+/* Vectorized helper: apply x86 saturation semantics to NEON conversion result.
+ * ARM returns 0 for NaN and INT32_MAX for positive overflow, but x86 returns
+ * INT32_MIN ("integer indefinite") for both. This function fixes up the result.
+ */
+FORCE_INLINE int32x4_t _sse2neon_cvtps_epi32_fixup(float32x4_t f, int32x4_t cvt)
+{
+    /* Detect values >= 2147483648.0f (out of INT32 range) */
+    float32x4_t max_f = vdupq_n_f32(2147483648.0f);
+    uint32x4_t overflow = vcgeq_f32(f, max_f);
+
+    /* Detect NaN: x != x for NaN values */
+    uint32x4_t is_nan = vmvnq_u32(vceqq_f32(f, f));
+
+    /* Combine: any overflow or NaN should produce INT32_MIN */
+    uint32x4_t need_indefinite = vorrq_u32(overflow, is_nan);
+
+    /* Blend: select INT32_MIN where needed */
+    int32x4_t indefinite = vdupq_n_s32(INT32_MIN);
+    return vbslq_s32(need_indefinite, indefinite, cvt);
+}
+
 /* SSE macros */
 #define _MM_GET_FLUSH_ZERO_MODE _sse2neon_mm_get_flush_zero_mode
 #define _MM_SET_FLUSH_ZERO_MODE _sse2neon_mm_set_flush_zero_mode
@@ -910,6 +1287,38 @@ FORCE_INLINE uint8x16x4_t _sse2neon_vld1q_u8_x4(const uint8_t *p)
 }
 #endif
 
+/* Wrapper for vcreate_u64 to handle Apple iOS toolchain variations.
+ * On iOS, vcreate_u64 may be defined as a macro in arm_neon.h, which can
+ * cause parsing issues in complex macro expansions.
+ * This wrapper provides a function-call interface using vdup_n_u64(), which
+ * is bit-exact and avoids macro expansion pitfalls.
+ *
+ * Other AArch64 platforms (Linux, macOS, Android) use native vcreate_u64.
+ *
+ * User override: Define SSE2NEON_IOS_COMPAT=1 to enable,
+ *                or SSE2NEON_IOS_COMPAT=0 to disable.
+ */
+#if defined(__APPLE__) && SSE2NEON_ARCH_AARCH64
+#include <TargetConditionals.h>
+#endif
+
+#ifndef SSE2NEON_IOS_COMPAT
+#if defined(__APPLE__) && SSE2NEON_ARCH_AARCH64 && TARGET_OS_IOS
+#define SSE2NEON_IOS_COMPAT 1
+#else
+#define SSE2NEON_IOS_COMPAT 0
+#endif
+#endif
+
+#if SSE2NEON_IOS_COMPAT
+FORCE_INLINE uint64x1_t _sse2neon_vcreate_u64(uint64_t a)
+{
+    return vdup_n_u64(a);
+}
+#else
+#define _sse2neon_vcreate_u64(a) vcreate_u64(a)
+#endif
+
 #if !SSE2NEON_ARCH_AARCH64
 /* emulate vaddv u8 variant */
 FORCE_INLINE uint8_t _sse2neon_vaddv_u8(uint8x8_t v8)
@@ -961,6 +1370,33 @@ FORCE_INLINE uint16_t _sse2neon_vaddvq_u16(uint16x8_t a)
 }
 #endif
 
+/* Fast "any nonzero" check for horizontal reduction in PCMPXSTR operations.
+ * These helpers are optimized for the "any match" test pattern common in
+ * string comparison intrinsics. On ARMv7, OR-based reduction is used instead
+ * of max-based reduction for slightly better performance on some cores.
+ *
+ * For NEON comparison results (0x00 or 0xFF per lane), OR-based reduction
+ * correctly detects any nonzero element because: max(a,b) > 0 IFF OR(a,b) != 0
+ */
+#if !SSE2NEON_ARCH_AARCH64
+/* ARMv7: OR-based reduction - 3 ops vs 4 ops for vpmax cascade */
+FORCE_INLINE uint32_t _sse2neon_any_nonzero_u8x16(uint8x16_t v)
+{
+    uint32x4_t as_u32 = vreinterpretq_u32_u8(v);
+    uint32x2_t or_half = vorr_u32(vget_low_u32(as_u32), vget_high_u32(as_u32));
+    uint32x2_t or_final = vorr_u32(or_half, vrev64_u32(or_half));
+    return vget_lane_u32(or_final, 0);
+}
+
+FORCE_INLINE uint32_t _sse2neon_any_nonzero_u16x8(uint16x8_t v)
+{
+    uint32x4_t as_u32 = vreinterpretq_u32_u16(v);
+    uint32x2_t or_half = vorr_u32(vget_low_u32(as_u32), vget_high_u32(as_u32));
+    uint32x2_t or_final = vorr_u32(or_half, vrev64_u32(or_half));
+    return vget_lane_u32(or_final, 0);
+}
+#endif
+
 /* Function Naming Conventions
  * The naming convention of SSE intrinsics is straightforward. A generic SSE
  * intrinsic function is given as follows:
@@ -998,8 +1434,8 @@ FORCE_INLINE uint16_t _sse2neon_vaddvq_u16(uint16x8_t a)
  */
 
 /* Constants for use with _mm_prefetch. */
-#if defined(_M_ARM64EC)
-/* winnt.h already defines these constants as macros, so undefine them first. */
+#if SSE2NEON_ARM64EC
+/* winnt.h defines these as macros; undef to allow our enum definition */
 #undef _MM_HINT_NTA
 #undef _MM_HINT_T0
 #undef _MM_HINT_T1
@@ -1169,8 +1605,8 @@ FORCE_INLINE __m128 _mm_shuffle_ps_2032(__m128 a, __m128 b)
 // supported by WoA has crypto extensions. If this changes in the future,
 // this can be verified via the runtime-only method of:
 // IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE)
-#if ((defined(_M_ARM64) || defined(_M_ARM64EC)) && !defined(__clang__)) || \
-    (defined(__ARM_FEATURE_CRYPTO) &&                                      \
+#if ((defined(_M_ARM64) || SSE2NEON_ARM64EC) && !defined(__clang__)) || \
+    (defined(__ARM_FEATURE_CRYPTO) &&                                   \
      (defined(__aarch64__) || __has_builtin(__builtin_arm_crypto_vmullp64)))
 // Wraps vmull_p64
 FORCE_INLINE uint64x2_t _sse2neon_vmull_p64(uint64x1_t _a, uint64x1_t _b)
@@ -2003,16 +2439,19 @@ FORCE_INLINE int64_t _mm_cvtss_si64(__m128 a)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_cvtt_ps2pi
 FORCE_INLINE __m64 _mm_cvtt_ps2pi(__m128 a)
 {
-    return vreinterpret_m64_s32(
-        vget_low_s32(vcvtq_s32_f32(vreinterpretq_f32_m128(a))));
+    float32x4_t f = vreinterpretq_f32_m128(a);
+    int32x4_t cvt = vcvtq_s32_f32(f);
+    int32x4_t result = _sse2neon_cvtps_epi32_fixup(f, cvt);
+    return vreinterpret_m64_s32(vget_low_s32(result));
 }
 
 // Convert the lower single-precision (32-bit) floating-point element in a to a
 // 32-bit integer with truncation, and store the result in dst.
+// x86 returns INT32_MIN for NaN and out-of-range values.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_cvtt_ss2si
 FORCE_INLINE int _mm_cvtt_ss2si(__m128 a)
 {
-    return vgetq_lane_s32(vcvtq_s32_f32(vreinterpretq_f32_m128(a)), 0);
+    return _sse2neon_cvtf_s32(vgetq_lane_f32(vreinterpretq_f32_m128(a), 0));
 }
 
 // Convert packed single-precision (32-bit) floating-point elements in a to
@@ -2027,11 +2466,11 @@ FORCE_INLINE int _mm_cvtt_ss2si(__m128 a)
 
 // Convert the lower single-precision (32-bit) floating-point element in a to a
 // 64-bit integer with truncation, and store the result in dst.
+// x86 returns INT64_MIN for NaN and out-of-range values.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_cvttss_si64
 FORCE_INLINE int64_t _mm_cvttss_si64(__m128 a)
 {
-    return _sse2neon_static_cast(int64_t,
-                                 vgetq_lane_f32(vreinterpretq_f32_m128(a), 0));
+    return _sse2neon_cvtf_s64(vgetq_lane_f32(vreinterpretq_f32_m128(a), 0));
 }
 
 // Divide packed single-precision (32-bit) floating-point elements in a by
@@ -2085,6 +2524,9 @@ FORCE_INLINE __m128 _mm_div_ss(__m128 a, __m128 b)
 
 // Free aligned memory that was allocated with _mm_malloc.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_free
+//
+// WARNING: Only use on pointers from _mm_malloc(). On Windows, passing memory
+// from malloc/calloc/new corrupts the heap. See _mm_malloc() for details.
 #if !defined(SSE2NEON_ALLOC_DEFINED)
 FORCE_INLINE void _mm_free(void *addr)
 {
@@ -2274,6 +2716,21 @@ FORCE_INLINE __m128i _mm_loadu_si64(const void *p)
 // and return a pointer to the allocated memory. _mm_free should be used to free
 // memory that is allocated with _mm_malloc.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_malloc
+//
+// Memory allocated by this function MUST be freed with _mm_free(), NOT with
+// standard free() or delete. Mixing allocators:
+//   - Windows: CORRUPTS HEAP (free on _aligned_malloc memory is invalid)
+//   - Other platforms: Works (maps to free), but pair for Windows portability
+//
+// Incorrect usage (causes memory corruption on Windows):
+//   void *ptr = _mm_malloc(1024, 16);
+//   free(ptr);  // WRONG - use _mm_free() instead
+//
+// Implementation notes:
+//   - Windows: Uses _aligned_malloc()
+//   - Other platforms: Uses posix_memalign() or malloc() for small alignments
+//
+// See also: _mm_free() for deallocation requirements.
 #if !defined(SSE2NEON_ALLOC_DEFINED)
 FORCE_INLINE void *_mm_malloc(size_t size, size_t align)
 {
@@ -2806,14 +3263,22 @@ FORCE_INLINE __m128 _mm_set1_ps(float _w)
 // Set the MXCSR control and status register with the value in unsigned 32-bit
 // integer a.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_setcsr
-// The MXCSR register contains the following fields:
-// - Bits 13-14: Rounding mode
-// - Bit 15: Flush-to-zero mode
-// - Bit 6: Denormals-are-zero mode
-// Exception flags and masks (bits 0-5, 7-12) are not supported on ARM NEON.
-// Note: On ARM, FPCR bit 24 controls flush-to-zero for both inputs (DAZ-like)
-// and outputs (FZ-like). Setting either FZ or DAZ enables this unified
-// behavior.
+//
+// Supported MXCSR fields:
+// - Bits 13-14: Rounding mode (RM) - SUPPORTED via ARM FPCR/FPSCR
+// - Bit 15 (FZ): Flush-to-zero mode - SUPPORTED via ARM FPCR/FPSCR bit 24
+// - Bit 6 (DAZ): Denormals-are-zero mode - SUPPORTED (unified with FZ on ARM)
+//
+// Unsupported MXCSR fields (silently ignored):
+// - Bits 0-5: Exception flags (IE, DE, ZE, OE, UE, PE) - NOT EMULATED
+// - Bits 7-12: Exception masks - NOT EMULATED
+// See "MXCSR Exception Flags - NOT EMULATED" documentation block for details.
+//
+// ARM Platform Behavior:
+// - ARM FPCR/FPSCR bit 24 provides unified FZ+DAZ behavior. Setting either
+//   _MM_FLUSH_ZERO_ON or _MM_DENORMALS_ZERO_ON enables the same ARM bit.
+// - ARMv7 NEON: "Flush-to-zero mode always enabled" per ARM ARM (impl may vary)
+// - ARMv8: FPCR.FZ correctly controls denormal handling for NEON operations
 FORCE_INLINE void _mm_setcsr(unsigned int a)
 {
     _MM_SET_ROUNDING_MODE(a & _MM_ROUND_MASK);
@@ -2825,14 +3290,22 @@ FORCE_INLINE void _mm_setcsr(unsigned int a)
 
 // Get the unsigned 32-bit value of the MXCSR control and status register.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_getcsr
-// The MXCSR register contains the following fields:
-// - Bits 13-14: Rounding mode
-// - Bit 15: Flush-to-zero mode
-// - Bit 6: Denormals-are-zero mode
-// Exception flags and masks (bits 0-5, 7-12) are not supported on ARM NEON.
-// Note: On ARM, FPCR bit 24 controls both FZ and DAZ behavior. When enabled,
-// both FZ and DAZ bits will be reported as set (cannot distinguish which was
-// originally requested).
+//
+// Returned MXCSR fields:
+// - Bits 13-14: Rounding mode (RM) - Reflects current ARM FPCR/FPSCR setting
+// - Bit 15 (FZ): Flush-to-zero mode - Reflects ARM FPCR/FPSCR bit 24
+// - Bit 6 (DAZ): Denormals-are-zero mode - Mirrors FZ (unified on ARM)
+//
+// Fields always returned as zero (NOT EMULATED):
+// - Bits 0-5: Exception flags - ALWAYS 0 (exceptions not tracked)
+// - Bits 7-12: Exception masks - ALWAYS 0 (use _MM_GET_EXCEPTION_MASK()
+// instead) See "MXCSR Exception Flags - NOT EMULATED" documentation block for
+// details.
+//
+// ARM Platform Behavior:
+// - When ARM FPCR/FPSCR bit 24 is enabled, both FZ and DAZ bits are reported
+//   as set (the original setting cannot be distinguished).
+// - ARMv7 NEON: Returned bits reflect FPSCR, but NEON always flushes denormals
 FORCE_INLINE unsigned int _mm_getcsr(void)
 {
     return _MM_GET_ROUNDING_MODE() | _MM_GET_FLUSH_ZERO_MODE() |
@@ -3006,11 +3479,14 @@ FORCE_INLINE __m128 _mm_sqrt_ps(__m128 in)
     float32x4_t _in = vreinterpretq_f32_m128(in);
     float32x4_t recip = vrsqrteq_f32(_in);
 
-    // Test for vrsqrteq_f32(0) -> positive infinity case.
-    // Change to zero, so that s * 1/sqrt(s) result is zero too.
+    // Test for vrsqrteq_f32(0) -> infinity case (both +Inf and -Inf).
+    // vrsqrteq_f32(+0) = +Inf, vrsqrteq_f32(-0) = -Inf
+    // Change recip to zero so that s * 1/sqrt(s) preserves signed zero:
+    //   +0 * 0 = +0, -0 * 0 = -0 (IEEE-754 sign rule)
+    const uint32x4_t abs_mask = vdupq_n_u32(0x7FFFFFFF);
     const uint32x4_t pos_inf = vdupq_n_u32(0x7F800000);
     const uint32x4_t div_by_zero =
-        vceqq_u32(pos_inf, vreinterpretq_u32_f32(recip));
+        vceqq_u32(pos_inf, vandq_u32(abs_mask, vreinterpretq_u32_f32(recip)));
     recip = vreinterpretq_f32_u32(
         vandq_u32(vmvnq_u32(div_by_zero), vreinterpretq_u32_f32(recip)));
 
@@ -3122,14 +3598,23 @@ FORCE_INLINE void _mm_storeu_si64(void *p, __m128i a)
 
 // Store 64-bits of integer data from a into memory using a non-temporal memory
 // hint.
+// Note: ARM lacks direct non-temporal store for single 64-bit value. STNP
+// requires pair stores; __builtin_nontemporal_store may generate regular store
+// on AArch64 for sub-128-bit types.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_pi
 FORCE_INLINE void _mm_stream_pi(__m64 *p, __m64 a)
 {
+#if __has_builtin(__builtin_nontemporal_store)
+    __builtin_nontemporal_store(a, p);
+#else
     vst1_s64(_sse2neon_reinterpret_cast(int64_t *, p), vreinterpret_s64_m64(a));
+#endif
 }
 
 // Store 128-bits (composed of 4 packed single-precision (32-bit) floating-
 // point elements) from a into memory using a non-temporal memory hint.
+// Note: On AArch64, __builtin_nontemporal_store generates STNP (Store
+// Non-temporal Pair), providing true non-temporal hint for 128-bit stores.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_ps
 FORCE_INLINE void _mm_stream_ps(float *p, __m128 a)
 {
@@ -3165,6 +3650,7 @@ FORCE_INLINE __m128 _mm_sub_ss(__m128 a, __m128 b)
 // (32-bit) floating-point elements in row0, row1, row2, and row3, and store the
 // transposed matrix in these vectors (row0 now contains column 0, etc.).
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=MM_TRANSPOSE4_PS
+#ifndef _MM_TRANSPOSE4_PS
 #define _MM_TRANSPOSE4_PS(row0, row1, row2, row3)         \
     do {                                                  \
         float32x4x2_t ROW01 = vtrnq_f32(row0, row1);      \
@@ -3178,6 +3664,7 @@ FORCE_INLINE __m128 _mm_sub_ss(__m128 a, __m128 b)
         row3 = vcombine_f32(vget_high_f32(ROW01.val[1]),  \
                             vget_high_f32(ROW23.val[1])); \
     } while (0)
+#endif
 
 // according to the documentation, these intrinsics behave the same as the
 // non-'u' versions.  We'll just alias them here.
@@ -3189,38 +3676,46 @@ FORCE_INLINE __m128 _mm_sub_ss(__m128 a, __m128 b)
 #define _mm_ucomineq_ss _mm_comineq_ss
 
 // Return vector of type __m128i with undefined elements.
+// Note: MSVC forces zero-initialization while GCC/Clang return truly undefined
+// memory. Use SSE2NEON_UNDEFINED_ZERO=1 to force zero on all compilers.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=mm_undefined_si128
 FORCE_INLINE __m128i _mm_undefined_si128(void)
 {
+#if SSE2NEON_UNDEFINED_ZERO || \
+    (SSE2NEON_COMPILER_MSVC && !SSE2NEON_COMPILER_CLANG)
+    return _mm_setzero_si128();
+#else
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wuninitialized"
 #endif
     __m128i a;
-#if SSE2NEON_COMPILER_MSVC && !SSE2NEON_COMPILER_CLANG
-    a = _mm_setzero_si128();
-#endif
     return a;
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma GCC diagnostic pop
 #endif
+#endif
 }
 
 // Return vector of type __m128 with undefined elements.
+// Note: MSVC forces zero-initialization while GCC/Clang return truly undefined
+// memory. Use SSE2NEON_UNDEFINED_ZERO=1 to force zero on all compilers.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_undefined_ps
 FORCE_INLINE __m128 _mm_undefined_ps(void)
 {
+#if SSE2NEON_UNDEFINED_ZERO || \
+    (SSE2NEON_COMPILER_MSVC && !SSE2NEON_COMPILER_CLANG)
+    return _mm_setzero_ps();
+#else
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wuninitialized"
 #endif
     __m128 a;
-#if SSE2NEON_COMPILER_MSVC && !SSE2NEON_COMPILER_CLANG
-    a = _mm_setzero_ps();
-#endif
     return a;
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma GCC diagnostic pop
+#endif
 #endif
 }
 
@@ -3453,6 +3948,16 @@ FORCE_INLINE __m128i _mm_avg_epu8(__m128i a, __m128i b)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_bsrli_si128
 #define _mm_bsrli_si128(a, imm) _mm_srli_si128(a, imm)
 
+/* Cast Intrinsics - Zero-Cost Type Reinterpretation
+ *
+ * The _mm_cast* intrinsics reinterpret vector types (__m128, __m128d, __m128i)
+ * without generating any instructions. These are pure type annotations that
+ * perform bitwise reinterpretation, NOT value conversion.
+ *
+ * Maps to ARM NEON vreinterpret_* / vreinterpretq_* (also zero-cost bitcasts).
+ * https://developer.arm.com/architectures/instruction-sets/intrinsics/#q=vreinterpret
+ */
+
 // Cast vector of type __m128d to type __m128. This intrinsic is only used for
 // compilation and does not generate any instructions, thus it has zero latency.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_castpd_ps
@@ -3568,11 +4073,18 @@ FORCE_INLINE __m128d _mm_cmpeq_pd(__m128d a, __m128d b)
     return vreinterpretq_m128d_u64(
         vceqq_f64(vreinterpretq_f64_m128d(a), vreinterpretq_f64_m128d(b)));
 #else
-    // (a == b) -> (a_lo == b_lo) && (a_hi == b_hi)
-    uint32x4_t cmp =
-        vceqq_u32(vreinterpretq_u32_m128d(a), vreinterpretq_u32_m128d(b));
-    uint32x4_t swapped = vrev64q_u32(cmp);
-    return vreinterpretq_m128d_u32(vandq_u32(cmp, swapped));
+    double a0 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(a), 0));
+    double a1 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(a), 1));
+    double b0 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(b), 0));
+    double b1 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(b), 1));
+    uint64_t d[2];
+    d[0] = a0 == b0 ? ~UINT64_C(0) : UINT64_C(0);
+    d[1] = a1 == b1 ? ~UINT64_C(0) : UINT64_C(0);
+    return vreinterpretq_m128d_u64(vld1q_u64(d));
 #endif
 }
 
@@ -3838,11 +4350,18 @@ FORCE_INLINE __m128d _mm_cmpneq_pd(__m128d a, __m128d b)
     return vreinterpretq_m128d_s32(vmvnq_s32(vreinterpretq_s32_u64(
         vceqq_f64(vreinterpretq_f64_m128d(a), vreinterpretq_f64_m128d(b)))));
 #else
-    // (a == b) -> (a_lo == b_lo) && (a_hi == b_hi)
-    uint32x4_t cmp =
-        vceqq_u32(vreinterpretq_u32_m128d(a), vreinterpretq_u32_m128d(b));
-    uint32x4_t swapped = vrev64q_u32(cmp);
-    return vreinterpretq_m128d_u32(vmvnq_u32(vandq_u32(cmp, swapped)));
+    double a0 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(a), 0));
+    double a1 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(a), 1));
+    double b0 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(b), 0));
+    double b1 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(b), 1));
+    uint64_t d[2];
+    d[0] = a0 != b0 ? ~UINT64_C(0) : UINT64_C(0);
+    d[1] = a1 != b1 ? ~UINT64_C(0) : UINT64_C(0);
+    return vreinterpretq_m128d_u64(vld1q_u64(d));
 #endif
 }
 
@@ -4167,16 +4686,11 @@ FORCE_INLINE int _mm_comieq_sd(__m128d a, __m128d b)
 #if SSE2NEON_ARCH_AARCH64
     return vgetq_lane_u64(vceqq_f64(a, b), 0) & 0x1;
 #else
-    uint32x4_t a_not_nan =
-        vceqq_u32(vreinterpretq_u32_m128d(a), vreinterpretq_u32_m128d(a));
-    uint32x4_t b_not_nan =
-        vceqq_u32(vreinterpretq_u32_m128d(b), vreinterpretq_u32_m128d(b));
-    uint32x4_t a_and_b_not_nan = vandq_u32(a_not_nan, b_not_nan);
-    uint32x4_t a_eq_b =
-        vceqq_u32(vreinterpretq_u32_m128d(a), vreinterpretq_u32_m128d(b));
-    uint64x2_t and_results = vandq_u64(vreinterpretq_u64_u32(a_and_b_not_nan),
-                                       vreinterpretq_u64_u32(a_eq_b));
-    return vgetq_lane_u64(and_results, 0) & 0x1;
+    double a0 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(a), 0));
+    double b0 =
+        sse2neon_recast_u64_f64(vgetq_lane_u64(vreinterpretq_u64_m128d(b), 0));
+    return a0 == b0 ? 1 : 0;
 #endif
 }
 
@@ -4280,58 +4794,68 @@ FORCE_INLINE __m128d _mm_cvtpi32_pd(__m64 a)
 
 // Convert packed single-precision (32-bit) floating-point elements in a to
 // packed 32-bit integers, and store the results in dst.
+// x86 returns INT32_MIN ("integer indefinite") for NaN and out-of-range values.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_cvtps_epi32
 // *NOTE*. The default rounding mode on SSE is 'round to even', which ARMv7-A
 // does not support! It is supported on ARMv8-A however.
 FORCE_INLINE __m128i _mm_cvtps_epi32(__m128 a)
 {
 #if defined(__ARM_FEATURE_FRINT)
-    return vreinterpretq_m128i_s32(vcvtq_s32_f32(vrnd32xq_f32(a)));
+    float32x4_t f = vreinterpretq_f32_m128(a);
+    int32x4_t cvt = vcvtq_s32_f32(vrnd32xq_f32(f));
+    return vreinterpretq_m128i_s32(_sse2neon_cvtps_epi32_fixup(f, cvt));
 #elif SSE2NEON_ARCH_AARCH64 || defined(__ARM_FEATURE_DIRECTED_ROUNDING)
+    float32x4_t f = vreinterpretq_f32_m128(a);
+    int32x4_t cvt;
     switch (_MM_GET_ROUNDING_MODE()) {
     case _MM_ROUND_NEAREST:
-        return vreinterpretq_m128i_s32(vcvtnq_s32_f32(a));
+        cvt = vcvtnq_s32_f32(f);
+        break;
     case _MM_ROUND_DOWN:
-        return vreinterpretq_m128i_s32(vcvtmq_s32_f32(a));
+        cvt = vcvtmq_s32_f32(f);
+        break;
     case _MM_ROUND_UP:
-        return vreinterpretq_m128i_s32(vcvtpq_s32_f32(a));
+        cvt = vcvtpq_s32_f32(f);
+        break;
     default:  // _MM_ROUND_TOWARD_ZERO
-        return vreinterpretq_m128i_s32(vcvtq_s32_f32(a));
+        cvt = vcvtq_s32_f32(f);
+        break;
     }
+    return vreinterpretq_m128i_s32(_sse2neon_cvtps_epi32_fixup(f, cvt));
 #else
     float *f = _sse2neon_reinterpret_cast(float *, &a);
     switch (_MM_GET_ROUNDING_MODE()) {
     case _MM_ROUND_NEAREST: {
+        float32x4_t fv = vreinterpretq_f32_m128(a);
         uint32x4_t signmask = vdupq_n_u32(0x80000000);
-        float32x4_t half = vbslq_f32(signmask, vreinterpretq_f32_m128(a),
-                                     vdupq_n_f32(0.5f)); /* +/- 0.5 */
-        int32x4_t r_normal = vcvtq_s32_f32(vaddq_f32(
-            vreinterpretq_f32_m128(a), half)); /* round to integer: [a + 0.5]*/
-        int32x4_t r_trunc = vcvtq_s32_f32(
-            vreinterpretq_f32_m128(a)); /* truncate to integer: [a] */
+        float32x4_t half =
+            vbslq_f32(signmask, fv, vdupq_n_f32(0.5f)); /* +/- 0.5 */
+        int32x4_t r_normal =
+            vcvtq_s32_f32(vaddq_f32(fv, half)); /* round to integer: [a + 0.5]*/
+        int32x4_t r_trunc = vcvtq_s32_f32(fv);  /* truncate to integer: [a] */
         int32x4_t plusone = vreinterpretq_s32_u32(vshrq_n_u32(
             vreinterpretq_u32_s32(vnegq_s32(r_trunc)), 31)); /* 1 or 0 */
         int32x4_t r_even = vbicq_s32(vaddq_s32(r_trunc, plusone),
                                      vdupq_n_s32(1)); /* ([a] + {0,1}) & ~1 */
         float32x4_t delta = vsubq_f32(
-            vreinterpretq_f32_m128(a),
-            vcvtq_f32_s32(r_trunc)); /* compute delta: delta = (a - [a]) */
+            fv, vcvtq_f32_s32(r_trunc)); /* compute delta: delta = (a - [a]) */
         uint32x4_t is_delta_half =
             vceqq_f32(delta, half); /* delta == +/- 0.5 */
-        return vreinterpretq_m128i_s32(
-            vbslq_s32(is_delta_half, r_even, r_normal));
+        int32x4_t result = vbslq_s32(is_delta_half, r_even, r_normal);
+        return vreinterpretq_m128i_s32(_sse2neon_cvtps_epi32_fixup(fv, result));
     }
     case _MM_ROUND_DOWN:
-        return _mm_set_epi32(floorf(f[3]), floorf(f[2]), floorf(f[1]),
-                             floorf(f[0]));
+        return _mm_set_epi32(
+            _sse2neon_cvtf_s32(floorf(f[3])), _sse2neon_cvtf_s32(floorf(f[2])),
+            _sse2neon_cvtf_s32(floorf(f[1])), _sse2neon_cvtf_s32(floorf(f[0])));
     case _MM_ROUND_UP:
-        return _mm_set_epi32(ceilf(f[3]), ceilf(f[2]), ceilf(f[1]),
-                             ceilf(f[0]));
+        return _mm_set_epi32(
+            _sse2neon_cvtf_s32(ceilf(f[3])), _sse2neon_cvtf_s32(ceilf(f[2])),
+            _sse2neon_cvtf_s32(ceilf(f[1])), _sse2neon_cvtf_s32(ceilf(f[0])));
     default:  // _MM_ROUND_TOWARD_ZERO
-        return _mm_set_epi32(_sse2neon_static_cast(int32_t, f[3]),
-                             _sse2neon_static_cast(int32_t, f[2]),
-                             _sse2neon_static_cast(int32_t, f[1]),
-                             _sse2neon_static_cast(int32_t, f[0]));
+        return _mm_set_epi32(_sse2neon_cvtf_s32(f[3]), _sse2neon_cvtf_s32(f[2]),
+                             _sse2neon_cvtf_s32(f[1]),
+                             _sse2neon_cvtf_s32(f[0]));
     }
 #endif
 }
@@ -4573,10 +5097,13 @@ FORCE_INLINE __m64 _mm_cvttpd_pi32(__m128d a)
 
 // Convert packed single-precision (32-bit) floating-point elements in a to
 // packed 32-bit integers with truncation, and store the results in dst.
+// x86 returns INT32_MIN ("integer indefinite") for NaN and out-of-range values.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_cvttps_epi32
 FORCE_INLINE __m128i _mm_cvttps_epi32(__m128 a)
 {
-    return vreinterpretq_m128i_s32(vcvtq_s32_f32(vreinterpretq_f32_m128(a)));
+    float32x4_t f = vreinterpretq_f32_m128(a);
+    int32x4_t cvt = vcvtq_s32_f32(f);
+    return vreinterpretq_m128i_s32(_sse2neon_cvtps_epi32_fixup(f, cvt));
 }
 
 // Convert the lower double-precision (64-bit) floating-point element in a to a
@@ -5650,7 +6177,7 @@ FORCE_INLINE __m128i _mm_setzero_si128(void)
 FORCE_INLINE __m128i _mm_sll_epi16(__m128i a, __m128i count)
 {
     uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
-    if (_sse2neon_unlikely(c & ~UINT64_C(15)))
+    if (_sse2neon_unlikely(c > 15))
         return _mm_setzero_si128();
 
     int16x8_t vc = vdupq_n_s16(_sse2neon_static_cast(int16_t, c));
@@ -5663,7 +6190,7 @@ FORCE_INLINE __m128i _mm_sll_epi16(__m128i a, __m128i count)
 FORCE_INLINE __m128i _mm_sll_epi32(__m128i a, __m128i count)
 {
     uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
-    if (_sse2neon_unlikely(c & ~UINT64_C(31)))
+    if (_sse2neon_unlikely(c > 31))
         return _mm_setzero_si128();
 
     int32x4_t vc = vdupq_n_s32(_sse2neon_static_cast(int32_t, c));
@@ -5676,7 +6203,7 @@ FORCE_INLINE __m128i _mm_sll_epi32(__m128i a, __m128i count)
 FORCE_INLINE __m128i _mm_sll_epi64(__m128i a, __m128i count)
 {
     uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
-    if (_sse2neon_unlikely(c & ~UINT64_C(63)))
+    if (_sse2neon_unlikely(c > 63))
         return _mm_setzero_si128();
 
     int64x2_t vc = vdupq_n_s64(_sse2neon_static_cast(int64_t, c));
@@ -5768,12 +6295,12 @@ FORCE_INLINE __m128d _mm_sqrt_sd(__m128d a, __m128d b)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_sra_epi16
 FORCE_INLINE __m128i _mm_sra_epi16(__m128i a, __m128i count)
 {
-    int64_t c = vgetq_lane_s64(count, 0);
-    if (_sse2neon_unlikely(c & ~15))
+    uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
+    if (_sse2neon_unlikely(c > 15))
         return _mm_cmplt_epi16(a, _mm_setzero_si128());
     return vreinterpretq_m128i_s16(
         vshlq_s16(vreinterpretq_s16_m128i(a),
-                  vdupq_n_s16(_sse2neon_static_cast(int16_t, -c))));
+                  vdupq_n_s16(-_sse2neon_static_cast(int16_t, c))));
 }
 
 // Shift packed 32-bit integers in a right by count while shifting in sign bits,
@@ -5781,12 +6308,12 @@ FORCE_INLINE __m128i _mm_sra_epi16(__m128i a, __m128i count)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_sra_epi32
 FORCE_INLINE __m128i _mm_sra_epi32(__m128i a, __m128i count)
 {
-    int64_t c = vgetq_lane_s64(count, 0);
-    if (_sse2neon_unlikely(c & ~31))
+    uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
+    if (_sse2neon_unlikely(c > 31))
         return _mm_cmplt_epi32(a, _mm_setzero_si128());
     return vreinterpretq_m128i_s32(
         vshlq_s32(vreinterpretq_s32_m128i(a),
-                  vdupq_n_s32(_sse2neon_static_cast(int, -c))));
+                  vdupq_n_s32(-_sse2neon_static_cast(int32_t, c))));
 }
 
 // Shift packed 16-bit integers in a right by imm8 while shifting in sign
@@ -5807,7 +6334,8 @@ FORCE_INLINE __m128i _mm_srai_epi16(__m128i a, int imm)
 // imm must be a compile-time constant in range [0, 255]
 #define _mm_srai_epi32(a, imm)                                                \
     _sse2neon_define0(                                                        \
-        __m128i, a, __m128i ret; if (_sse2neon_unlikely((imm) == 0)) {        \
+        __m128i, a, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255); __m128i ret;   \
+        if (_sse2neon_unlikely((imm) == 0)) {                                 \
             ret = _a;                                                         \
         } else if (_sse2neon_likely(0 < (imm) && (imm) < 32)) {               \
             ret = vreinterpretq_m128i_s32(                                    \
@@ -5823,7 +6351,7 @@ FORCE_INLINE __m128i _mm_srai_epi16(__m128i a, int imm)
 FORCE_INLINE __m128i _mm_srl_epi16(__m128i a, __m128i count)
 {
     uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
-    if (_sse2neon_unlikely(c & ~UINT64_C(15)))
+    if (_sse2neon_unlikely(c > 15))
         return _mm_setzero_si128();
 
     int16x8_t vc = vdupq_n_s16(-_sse2neon_static_cast(int16_t, c));
@@ -5836,7 +6364,7 @@ FORCE_INLINE __m128i _mm_srl_epi16(__m128i a, __m128i count)
 FORCE_INLINE __m128i _mm_srl_epi32(__m128i a, __m128i count)
 {
     uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
-    if (_sse2neon_unlikely(c & ~UINT64_C(31)))
+    if (_sse2neon_unlikely(c > 31))
         return _mm_setzero_si128();
 
     int32x4_t vc = vdupq_n_s32(-_sse2neon_static_cast(int32_t, c));
@@ -5849,7 +6377,7 @@ FORCE_INLINE __m128i _mm_srl_epi32(__m128i a, __m128i count)
 FORCE_INLINE __m128i _mm_srl_epi64(__m128i a, __m128i count)
 {
     uint64_t c = vreinterpretq_nth_u64_m128i(count, 0);
-    if (_sse2neon_unlikely(c & ~UINT64_C(63)))
+    if (_sse2neon_unlikely(c > 63))
         return _mm_setzero_si128();
 
     int64x2_t vc = vdupq_n_s64(-_sse2neon_static_cast(int64_t, c));
@@ -5859,14 +6387,16 @@ FORCE_INLINE __m128i _mm_srl_epi64(__m128i a, __m128i count)
 // Shift packed 16-bit integers in a right by imm8 while shifting in zeros, and
 // store the results in dst.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_srli_epi16
-#define _mm_srli_epi16(a, imm)                                          \
-    _sse2neon_define0(                                                  \
-        __m128i, a, __m128i ret; if (_sse2neon_unlikely((imm) & ~15)) { \
-            ret = _mm_setzero_si128();                                  \
-        } else {                                                        \
-            ret = vreinterpretq_m128i_u16(vshlq_u16(                    \
-                vreinterpretq_u16_m128i(_a),                            \
-                vdupq_n_s16(_sse2neon_static_cast(int16_t, -(imm)))));  \
+// imm must be a compile-time constant in range [0, 255]
+#define _mm_srli_epi16(a, imm)                                              \
+    _sse2neon_define0(                                                      \
+        __m128i, a, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255); __m128i ret; \
+        if (_sse2neon_unlikely((imm) & ~15)) {                              \
+            ret = _mm_setzero_si128();                                      \
+        } else {                                                            \
+            ret = vreinterpretq_m128i_u16(vshlq_u16(                        \
+                vreinterpretq_u16_m128i(_a),                                \
+                vdupq_n_s16(_sse2neon_static_cast(int16_t, -(imm)))));      \
         } _sse2neon_return(ret);)
 
 // Shift packed 32-bit integers in a right by imm8 while shifting in zeros, and
@@ -5876,7 +6406,8 @@ FORCE_INLINE __m128i _mm_srl_epi64(__m128i a, __m128i count)
 // imm must be a compile-time constant in range [0, 255]
 #define _mm_srli_epi32(a, imm)                                                \
     _sse2neon_define0(                                                        \
-        __m128i, a, __m128i ret; if (_sse2neon_unlikely((imm) & ~31)) {       \
+        __m128i, a, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255); __m128i ret;   \
+        if (_sse2neon_unlikely((imm) & ~31)) {                                \
             ret = _mm_setzero_si128();                                        \
         } else {                                                              \
             ret = vreinterpretq_m128i_u32(                                    \
@@ -5886,9 +6417,11 @@ FORCE_INLINE __m128i _mm_srl_epi64(__m128i a, __m128i count)
 // Shift packed 64-bit integers in a right by imm8 while shifting in zeros, and
 // store the results in dst.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_srli_epi64
+// imm must be a compile-time constant in range [0, 255]
 #define _mm_srli_epi64(a, imm)                                                \
     _sse2neon_define0(                                                        \
-        __m128i, a, __m128i ret; if (_sse2neon_unlikely((imm) & ~63)) {       \
+        __m128i, a, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255); __m128i ret;   \
+        if (_sse2neon_unlikely((imm) & ~63)) {                                \
             ret = _mm_setzero_si128();                                        \
         } else {                                                              \
             ret = vreinterpretq_m128i_u64(                                    \
@@ -6045,6 +6578,8 @@ FORCE_INLINE void _mm_storeu_si32(void *p, __m128i a)
 // elements) from a into memory using a non-temporal memory hint. mem_addr must
 // be aligned on a 16-byte boundary or a general-protection exception may be
 // generated.
+// Note: On AArch64, __builtin_nontemporal_store generates STNP (Store
+// Non-temporal Pair), providing true non-temporal hint for 128-bit stores.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_pd
 FORCE_INLINE void _mm_stream_pd(double *p, __m128d a)
 {
@@ -6061,6 +6596,8 @@ FORCE_INLINE void _mm_stream_pd(double *p, __m128d a)
 // Store 128-bits of integer data from a into memory using a non-temporal memory
 // hint. mem_addr must be aligned on a 16-byte boundary or a general-protection
 // exception may be generated.
+// Note: On AArch64, __builtin_nontemporal_store generates STNP (Store
+// Non-temporal Pair), providing true non-temporal hint for 128-bit stores.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_si128
 FORCE_INLINE void _mm_stream_si128(__m128i *p, __m128i a)
 {
@@ -6075,20 +6612,33 @@ FORCE_INLINE void _mm_stream_si128(__m128i *p, __m128i a)
 // Store 32-bit integer a into memory using a non-temporal hint to minimize
 // cache pollution. If the cache line containing address mem_addr is already in
 // the cache, the cache will be updated.
+// Note: ARM lacks non-temporal store for 32-bit scalar. STNP requires pair
+// stores; __builtin_nontemporal_store may generate regular store on AArch64.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_si32
 FORCE_INLINE void _mm_stream_si32(int *p, int a)
 {
+#if __has_builtin(__builtin_nontemporal_store)
+    __builtin_nontemporal_store(a, p);
+#else
     vst1q_lane_s32(_sse2neon_reinterpret_cast(int32_t *, p), vdupq_n_s32(a), 0);
+#endif
 }
 
 // Store 64-bit integer a into memory using a non-temporal hint to minimize
 // cache pollution. If the cache line containing address mem_addr is already in
 // the cache, the cache will be updated.
+// Note: ARM lacks direct non-temporal store for single 64-bit value. STNP
+// requires pair stores; __builtin_nontemporal_store may generate regular store
+// on AArch64.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_si64
 FORCE_INLINE void _mm_stream_si64(__int64 *p, __int64 a)
 {
+#if __has_builtin(__builtin_nontemporal_store)
+    __builtin_nontemporal_store(a, p);
+#else
     vst1_s64(_sse2neon_reinterpret_cast(int64_t *, p),
              vdup_n_s64(_sse2neon_static_cast(int64_t, a)));
+#endif
 }
 
 // Subtract packed 16-bit integers in b from packed 16-bit integers in a, and
@@ -6214,20 +6764,24 @@ FORCE_INLINE __m128i _mm_subs_epu8(__m128i a, __m128i b)
 #define _mm_ucomineq_sd _mm_comineq_sd
 
 // Return vector of type __m128d with undefined elements.
+// Note: MSVC forces zero-initialization while GCC/Clang return truly undefined
+// memory. Use SSE2NEON_UNDEFINED_ZERO=1 to force zero on all compilers.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_undefined_pd
 FORCE_INLINE __m128d _mm_undefined_pd(void)
 {
+#if SSE2NEON_UNDEFINED_ZERO || \
+    (SSE2NEON_COMPILER_MSVC && !SSE2NEON_COMPILER_CLANG)
+    return _mm_setzero_pd();
+#else
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wuninitialized"
 #endif
     __m128d a;
-#if SSE2NEON_COMPILER_MSVC && !SSE2NEON_COMPILER_CLANG
-    a = _mm_setzero_pd();
-#endif
     return a;
 #if SSE2NEON_COMPILER_GCC_COMPAT
 #pragma GCC diagnostic pop
+#endif
 #endif
 }
 
@@ -6409,6 +6963,13 @@ FORCE_INLINE __m128i _mm_xor_si128(__m128i a, __m128i b)
 
 /* SSE3 */
 
+// Rounding mode note: The single-precision horizontal operations
+// (_mm_addsub_ps, _mm_hadd_ps, _mm_hsub_ps) are sensitive to rounding mode
+// on ARM. On x86, these intrinsics produce consistent results regardless of
+// MXCSR rounding mode. On ARM NEON, the current FPCR/FPSCR rounding mode
+// affects intermediate results. For consistent cross-platform behavior, call
+// _MM_SET_ROUNDING_MODE(_MM_ROUND_NEAREST) before using these intrinsics.
+
 // Alternatively add and subtract packed double-precision (64-bit)
 // floating-point elements in a to/from packed elements in b, and store the
 // results in dst.
@@ -6427,7 +6988,7 @@ FORCE_INLINE __m128d _mm_addsub_pd(__m128d a, __m128d b)
 
 // Alternatively add and subtract packed single-precision (32-bit)
 // floating-point elements in a to/from packed elements in b, and store the
-// results in dst.
+// results in dst. See SSE3 rounding mode note above.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=addsub_ps
 FORCE_INLINE __m128 _mm_addsub_ps(__m128 a, __m128 b)
 {
@@ -6466,6 +7027,7 @@ FORCE_INLINE __m128d _mm_hadd_pd(__m128d a, __m128d b)
 
 // Horizontally add adjacent pairs of single-precision (32-bit) floating-point
 // elements in a and b, and pack the results in dst.
+// See SSE3 rounding mode note above.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_hadd_ps
 FORCE_INLINE __m128 _mm_hadd_ps(__m128 a, __m128 b)
 {
@@ -6509,6 +7071,7 @@ FORCE_INLINE __m128d _mm_hsub_pd(__m128d a, __m128d b)
 
 // Horizontally subtract adjacent pairs of single-precision (32-bit)
 // floating-point elements in a and b, and pack the results in dst.
+// See SSE3 rounding mode note above.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_hsub_ps
 FORCE_INLINE __m128 _mm_hsub_ps(__m128 _a, __m128 _b)
 {
@@ -6533,6 +7096,26 @@ FORCE_INLINE __m128 _mm_hsub_ps(__m128 _a, __m128 _b)
 // elements of dst.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_loaddup_pd
 #define _mm_loaddup_pd _mm_load1_pd
+
+// Sets up a linear address range to be monitored by hardware and activates the
+// monitor. The address range should be a write-back memory caching type.
+//
+// ARM implementation notes:
+// - This is a NO-OP. ARM has no userspace equivalent for "monitor a cacheline
+//   and wake on store". There is no "armed" address after calling this.
+// - The extensions and hints parameters are ignored (no architectural
+//   equivalent for x86 C-state hints on ARM).
+// - _mm_mwait provides only a low-power hint, not a monitor-armed wait.
+//
+// https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_monitor
+FORCE_INLINE void _mm_monitor(void const *p,
+                              unsigned int extensions,
+                              unsigned int hints)
+{
+    (void) p;
+    (void) extensions;
+    (void) hints;
+}
 
 // Duplicate the low double-precision (64-bit) floating-point element from a,
 // and store the results in dst.
@@ -6584,6 +7167,64 @@ FORCE_INLINE __m128 _mm_moveldup_ps(__m128 a)
     float ALIGN_STRUCT(16) data[4] = {a0, a0, a2, a2};
     return vreinterpretq_m128_f32(vld1q_f32(data));
 #endif
+}
+
+// Provides a hint that allows the processor to enter an implementation-
+// dependent optimized state while waiting for a memory write to the monitored
+// address range set up by _mm_monitor.
+//
+// ARM implementation notes:
+// - This is only a LOW-POWER HINT, not a monitor-armed wait. Since _mm_monitor
+//   is a no-op on ARM, there is no "armed" address range to wake on.
+// - The extensions and hints parameters are ignored (no architectural
+//   equivalent for x86 C-state hints on ARM).
+// - No memory ordering is guaranteed beyond what the hint instruction provides.
+// - WFI/WFE in EL0 may trap depending on OS configuration (Linux can trap
+//   EL0 WFI/WFE via SCTLR_EL1; iOS/macOS may also restrict these).
+//
+// Behavior controlled by SSE2NEON_MWAIT_POLICY (see top of file for details).
+// https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_mwait
+FORCE_INLINE void _mm_mwait(unsigned int extensions, unsigned int hints)
+{
+    (void) extensions;
+    (void) hints;
+
+    // ARM implementation: low-power hint via yield/wfe/wfi.
+    // x86: no-op for compilation (MONITOR/MWAIT require CPL0, trap in
+    // userspace).
+#if SSE2NEON_ARCH_AARCH64 || defined(__arm__) || defined(_M_ARM) || \
+    defined(_M_ARM64)
+    // Use MSVC intrinsics on Windows ARM, inline asm on GCC/Clang.
+    // Note: GCC's arm_acle.h may not define __yield/__wfe/__wfi on all
+    // versions.
+#if SSE2NEON_MWAIT_POLICY == 0
+    // Policy 0: yield - safe everywhere, never blocks
+#if SSE2NEON_COMPILER_MSVC
+    __yield();
+#else
+    __asm__ __volatile__("yield" ::: "memory");
+#endif
+
+#elif SSE2NEON_MWAIT_POLICY == 1
+    // Policy 1: wfe - event wait, requires SEV/SEVL, may block
+#if SSE2NEON_COMPILER_MSVC
+    __wfe();
+#else
+    __asm__ __volatile__("wfe" ::: "memory");
+#endif
+
+#elif SSE2NEON_MWAIT_POLICY == 2
+    // Policy 2: wfi - interrupt wait, may trap in EL0
+#if SSE2NEON_COMPILER_MSVC
+    __wfi();
+#else
+    __asm__ __volatile__("wfi" ::: "memory");
+#endif
+
+#else
+#error "Invalid SSE2NEON_MWAIT_POLICY value (must be 0, 1, or 2)"
+#endif
+#endif /* ARM architecture */
 }
 
 /* SSSE3 */
@@ -6641,22 +7282,45 @@ FORCE_INLINE __m64 _mm_abs_pi8(__m64 a)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_alignr_epi8
 // imm must be a compile-time constant in range [0, 255]
 #if defined(__GNUC__) && !defined(__clang__)
-#define _mm_alignr_epi8(a, b, imm)                                 \
-    __extension__({                                                \
-        SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255);                 \
-        uint8x16_t _a = vreinterpretq_u8_m128i(a);                 \
-        uint8x16_t _b = vreinterpretq_u8_m128i(b);                 \
-        __m128i ret;                                               \
-        if (_sse2neon_unlikely((imm) & ~31))                       \
-            ret = vreinterpretq_m128i_u8(vdupq_n_u8(0));           \
-        else if ((imm) >= 16)                                      \
-            ret = _mm_srli_si128(a, (imm) >= 16 ? (imm) - 16 : 0); \
-        else                                                       \
-            ret = vreinterpretq_m128i_u8(                          \
-                vextq_u8(_b, _a, (imm) < 16 ? (imm) : 0));         \
-        ret;                                                       \
+#define _mm_alignr_epi8(a, b, imm)                                        \
+    __extension__({                                                       \
+        SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255);                        \
+        __m128i _a_m128i = (a);                                           \
+        uint8x16_t _a = vreinterpretq_u8_m128i(_a_m128i);                 \
+        uint8x16_t _b = vreinterpretq_u8_m128i(b);                        \
+        __m128i ret;                                                      \
+        if (_sse2neon_unlikely((imm) & ~31))                              \
+            ret = vreinterpretq_m128i_u8(vdupq_n_u8(0));                  \
+        else if ((imm) >= 16)                                             \
+            ret = vreinterpretq_m128i_s8(                                 \
+                vextq_s8(vreinterpretq_s8_m128i(_a_m128i), vdupq_n_s8(0), \
+                         ((imm) >= 16 && (imm) < 32) ? (imm) - 16 : 0));  \
+        else                                                              \
+            ret = vreinterpretq_m128i_u8(                                 \
+                vextq_u8(_b, _a, (imm) < 16 ? (imm) : 0));                \
+        ret;                                                              \
     })
 
+// Clang path: inline _mm_srli_si128 logic to avoid both:
+// 1. Variable shadowing: _mm_srli_si128(_a, ...) creates __m128i _a = (_a)
+// 2. Double evaluation: _mm_srli_si128((a), ...) re-evaluates macro arg
+#elif SSE2NEON_COMPILER_CLANG
+#define _mm_alignr_epi8(a, b, imm)                                   \
+    _sse2neon_define2(                                               \
+        __m128i, a, b, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255);    \
+        uint8x16_t __a = vreinterpretq_u8_m128i(_a);                 \
+        uint8x16_t __b = vreinterpretq_u8_m128i(_b); __m128i ret;    \
+        if (_sse2neon_unlikely((imm) & ~31)) ret =                   \
+            vreinterpretq_m128i_u8(vdupq_n_u8(0));                   \
+        else if ((imm) >= 16) ret = vreinterpretq_m128i_s8(          \
+            vextq_s8(vreinterpretq_s8_m128i(_a), vdupq_n_s8(0),      \
+                     ((imm) >= 16 && (imm) < 32) ? (imm) - 16 : 0)); \
+        else ret = vreinterpretq_m128i_u8(                           \
+            vextq_u8(__b, __a, (imm) < 16 ? (imm) : 0));             \
+        _sse2neon_return(ret);)
+
+// MSVC path: use _a (lambda parameter) since lambda [] cannot capture (a).
+// No shadowing issue because lambda parameters shadow captures properly.
 #else
 #define _mm_alignr_epi8(a, b, imm)                                \
     _sse2neon_define2(                                            \
@@ -6677,26 +7341,39 @@ FORCE_INLINE __m64 _mm_abs_pi8(__m64 a)
 // the result right by imm8 bytes, and store the low 8 bytes in dst.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_alignr_pi8
 // imm must be a compile-time constant in range [0, 255]
+#if defined(__GNUC__) && !defined(__clang__)
 #define _mm_alignr_pi8(a, b, imm)                                           \
-    _sse2neon_define2(                                                      \
-        __m64, a, b, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255); __m64 ret;  \
+    __extension__({                                                         \
+        SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255);                          \
+        __m64 _a = (a), _b = (b);                                           \
+        __m64 ret;                                                          \
         if (_sse2neon_unlikely((imm) >= 16)) {                              \
             ret = vreinterpret_m64_s8(vdup_n_s8(0));                        \
+        } else if ((imm) >= 8) {                                            \
+            ret = vreinterpret_m64_u8(                                      \
+                vext_u8(vreinterpret_u8_m64(_a), vdup_n_u8(0), (imm) - 8)); \
         } else {                                                            \
-            uint8x8_t tmp_low;                                              \
-            uint8x8_t tmp_high;                                             \
-            if ((imm) >= 8) {                                               \
-                const int idx = (imm) - 8;                                  \
-                tmp_low = vreinterpret_u8_m64(_a);                          \
-                tmp_high = vdup_n_u8(0);                                    \
-                ret = vreinterpret_m64_u8(vext_u8(tmp_low, tmp_high, idx)); \
-            } else {                                                        \
-                const int idx = (imm);                                      \
-                tmp_low = vreinterpret_u8_m64(_b);                          \
-                tmp_high = vreinterpret_u8_m64(_a);                         \
-                ret = vreinterpret_m64_u8(vext_u8(tmp_low, tmp_high, idx)); \
-            }                                                               \
+            ret = vreinterpret_m64_u8(vext_u8(                              \
+                vreinterpret_u8_m64(_b), vreinterpret_u8_m64(_a), (imm)));  \
+        }                                                                   \
+        ret;                                                                \
+    })
+
+#else
+#define _mm_alignr_pi8(a, b, imm)                                              \
+    _sse2neon_define2(                                                         \
+        __m64, a, b, SSE2NEON_REQUIRE_CONST_RANGE(imm, 0, 255); __m64 ret;     \
+        if (_sse2neon_unlikely((imm) >= 16)) {                                 \
+            ret = vreinterpret_m64_s8(vdup_n_s8(0));                           \
+        } else if ((imm) >= 8) {                                               \
+            ret = vreinterpret_m64_u8(vext_u8(vreinterpret_u8_m64(_a),         \
+                                              vdup_n_u8(0), ((imm) - 8) & 7)); \
+        } else {                                                               \
+            ret = vreinterpret_m64_u8(vext_u8(                                 \
+                vreinterpret_u8_m64(_b), vreinterpret_u8_m64(_a), (imm) & 7)); \
         } _sse2neon_return(ret);)
+
+#endif
 
 // Horizontally add adjacent pairs of 16-bit integers in a and b, and pack the
 // signed 16-bit results in dst.
@@ -7730,9 +8407,10 @@ FORCE_INLINE __m128 _mm_floor_ss(__m128 a, __m128 b)
 // element from b into tmp using the control in imm8. Store tmp to dst using
 // the mask in imm8 (elements are zeroed out when the corresponding bit is set).
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=insert_ps
+// imm8 must be a compile-time constant in range [0, 255]
 #define _mm_insert_ps(a, b, imm8)                                              \
     _sse2neon_define2(                                                         \
-        __m128, a, b,                                                          \
+        __m128, a, b, SSE2NEON_REQUIRE_CONST_RANGE(imm8, 0, 255);              \
         float32x4_t tmp1 =                                                     \
             vsetq_lane_f32(vgetq_lane_f32(_b, ((imm8) >> 6) & 0x3),            \
                            vreinterpretq_f32_m128(_a), 0);                     \
@@ -8075,28 +8753,36 @@ FORCE_INLINE __m128 _mm_round_ps(__m128 a, int rounding)
     }
 #else
     float *v_float = _sse2neon_reinterpret_cast(float *, &a);
+    float32x4_t v = vreinterpretq_f32_m128(a);
+
+    /* Detect values safe to convert to int32. Values outside this range
+     * (including infinity, NaN, and large finite values) must be preserved
+     * as-is since integer conversion would produce undefined results. */
+    const float32x4_t max_representable = vdupq_n_f32(2147483520.0f);
+    uint32x4_t is_safe =
+        vcleq_f32(vabsq_f32(v), max_representable); /* |v| <= max int32 */
 
     if (rounding == _MM_FROUND_TO_NEAREST_INT ||
         (rounding == _MM_FROUND_CUR_DIRECTION &&
          _MM_GET_ROUNDING_MODE() == _MM_ROUND_NEAREST)) {
         uint32x4_t signmask = vdupq_n_u32(0x80000000);
-        float32x4_t half = vbslq_f32(signmask, vreinterpretq_f32_m128(a),
-                                     vdupq_n_f32(0.5f)); /* +/- 0.5 */
-        int32x4_t r_normal = vcvtq_s32_f32(vaddq_f32(
-            vreinterpretq_f32_m128(a), half)); /* round to integer: [a + 0.5]*/
-        int32x4_t r_trunc = vcvtq_s32_f32(
-            vreinterpretq_f32_m128(a)); /* truncate to integer: [a] */
+        float32x4_t half =
+            vbslq_f32(signmask, v, vdupq_n_f32(0.5f)); /* +/- 0.5 */
+        int32x4_t r_normal =
+            vcvtq_s32_f32(vaddq_f32(v, half)); /* round to integer: [a + 0.5]*/
+        int32x4_t r_trunc = vcvtq_s32_f32(v);  /* truncate to integer: [a] */
         int32x4_t plusone = vreinterpretq_s32_u32(vshrq_n_u32(
             vreinterpretq_u32_s32(vnegq_s32(r_trunc)), 31)); /* 1 or 0 */
         int32x4_t r_even = vbicq_s32(vaddq_s32(r_trunc, plusone),
                                      vdupq_n_s32(1)); /* ([a] + {0,1}) & ~1 */
         float32x4_t delta = vsubq_f32(
-            vreinterpretq_f32_m128(a),
-            vcvtq_f32_s32(r_trunc)); /* compute delta: delta = (a - [a]) */
+            v, vcvtq_f32_s32(r_trunc)); /* compute delta: delta = (a - [a]) */
         uint32x4_t is_delta_half =
             vceqq_f32(delta, half); /* delta == +/- 0.5 */
-        return vreinterpretq_m128_f32(
-            vcvtq_f32_s32(vbslq_s32(is_delta_half, r_even, r_normal)));
+        float32x4_t rounded =
+            vcvtq_f32_s32(vbslq_s32(is_delta_half, r_even, r_normal));
+        /* Preserve original value for inputs outside int32 range */
+        return vreinterpretq_m128_f32(vbslq_f32(is_safe, rounded, v));
     } else if (rounding == _MM_FROUND_TO_NEG_INF ||
                (rounding == _MM_FROUND_CUR_DIRECTION &&
                 _MM_GET_ROUNDING_MODE() == _MM_ROUND_DOWN)) {
@@ -8146,10 +8832,12 @@ FORCE_INLINE __m128 _mm_round_ss(__m128 a, __m128 b, int rounding)
 // Load 128-bits of integer data from memory into dst using a non-temporal
 // memory hint. mem_addr must be aligned on a 16-byte boundary or a
 // general-protection exception may be generated.
+// Note: On AArch64, __builtin_nontemporal_load generates LDNP (Load
+// Non-temporal Pair), providing true non-temporal hint for 128-bit loads.
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_stream_load_si128
 FORCE_INLINE __m128i _mm_stream_load_si128(__m128i *p)
 {
-#if __has_builtin(__builtin_nontemporal_store)
+#if __has_builtin(__builtin_nontemporal_load)
     return __builtin_nontemporal_load(p);
 #else
     return vreinterpretq_m128i_s64(
@@ -8470,26 +9158,24 @@ static uint16_t _sse2neon_aggregate_equal_any_8x16(int la,
     ((vmaxvq_u8(vandq_u8(vec, vreinterpretq_u8_m128i(mtx[i]))) ? 1U : 0U) \
      << (i))
     uint16_t res = _sse2neon_static_cast(
-        uint16_t, SSE2NEON_UMAXV_MATCH(0) | SSE2NEON_UMAXV_MATCH(1) |
-                      SSE2NEON_UMAXV_MATCH(2) | SSE2NEON_UMAXV_MATCH(3) |
-                      SSE2NEON_UMAXV_MATCH(4) | SSE2NEON_UMAXV_MATCH(5) |
-                      SSE2NEON_UMAXV_MATCH(6) | SSE2NEON_UMAXV_MATCH(7) |
-                      SSE2NEON_UMAXV_MATCH(8) | SSE2NEON_UMAXV_MATCH(9) |
-                      SSE2NEON_UMAXV_MATCH(10) | SSE2NEON_UMAXV_MATCH(11) |
-                      SSE2NEON_UMAXV_MATCH(12) | SSE2NEON_UMAXV_MATCH(13) |
-                      SSE2NEON_UMAXV_MATCH(14) | SSE2NEON_UMAXV_MATCH(15));
+        uint16_t, (SSE2NEON_UMAXV_MATCH(0) | SSE2NEON_UMAXV_MATCH(1) |
+                   SSE2NEON_UMAXV_MATCH(2) | SSE2NEON_UMAXV_MATCH(3) |
+                   SSE2NEON_UMAXV_MATCH(4) | SSE2NEON_UMAXV_MATCH(5) |
+                   SSE2NEON_UMAXV_MATCH(6) | SSE2NEON_UMAXV_MATCH(7) |
+                   SSE2NEON_UMAXV_MATCH(8) | SSE2NEON_UMAXV_MATCH(9) |
+                   SSE2NEON_UMAXV_MATCH(10) | SSE2NEON_UMAXV_MATCH(11) |
+                   SSE2NEON_UMAXV_MATCH(12) | SSE2NEON_UMAXV_MATCH(13) |
+                   SSE2NEON_UMAXV_MATCH(14) | SSE2NEON_UMAXV_MATCH(15)) &
+                      0xFFFFu);
 #undef SSE2NEON_UMAXV_MATCH
 #else
-    /* ARMv7: Use pairwise max for horizontal reduction */
+    /* ARMv7: Use OR-based horizontal reduction (faster than vpmax cascade).
+     * The _sse2neon_any_nonzero_u8x16 helper uses 3 OR ops vs 4 vpmax ops.
+     */
     uint16_t res = 0;
     for (int j = 0; j < 16; j++) {
         uint8x16_t masked = vandq_u8(vec, vreinterpretq_u8_m128i(mtx[j]));
-        /* Fold 16 bytes to 8 using pairwise max */
-        uint8x8_t fold = vpmax_u8(vget_low_u8(masked), vget_high_u8(masked));
-        fold = vpmax_u8(fold, fold);
-        fold = vpmax_u8(fold, fold);
-        fold = vpmax_u8(fold, fold);
-        res |= (vget_lane_u8(fold, 0) ? 1 : 0) << j;
+        res |= (_sse2neon_any_nonzero_u8x16(masked) ? 1U : 0U) << j;
     }
 #endif
     /* Mask result to valid range based on lb */
@@ -8513,22 +9199,18 @@ static uint16_t _sse2neon_aggregate_equal_any_16x8(int la,
     ((vmaxvq_u16(vandq_u16(vec, vreinterpretq_u16_m128i(mtx[i]))) ? 1U : 0U) \
      << (i))
     uint16_t res = _sse2neon_static_cast(
-        uint16_t, SSE2NEON_UMAXV_MATCH16(0) | SSE2NEON_UMAXV_MATCH16(1) |
-                      SSE2NEON_UMAXV_MATCH16(2) | SSE2NEON_UMAXV_MATCH16(3) |
-                      SSE2NEON_UMAXV_MATCH16(4) | SSE2NEON_UMAXV_MATCH16(5) |
-                      SSE2NEON_UMAXV_MATCH16(6) | SSE2NEON_UMAXV_MATCH16(7));
+        uint16_t, (SSE2NEON_UMAXV_MATCH16(0) | SSE2NEON_UMAXV_MATCH16(1) |
+                   SSE2NEON_UMAXV_MATCH16(2) | SSE2NEON_UMAXV_MATCH16(3) |
+                   SSE2NEON_UMAXV_MATCH16(4) | SSE2NEON_UMAXV_MATCH16(5) |
+                   SSE2NEON_UMAXV_MATCH16(6) | SSE2NEON_UMAXV_MATCH16(7)) &
+                      0xFFu);
 #undef SSE2NEON_UMAXV_MATCH16
 #else
-    /* ARMv7: Use pairwise max for horizontal reduction */
+    /* ARMv7: Use OR-based horizontal reduction */
     uint16_t res = 0;
     for (int j = 0; j < 8; j++) {
         uint16x8_t masked = vandq_u16(vec, vreinterpretq_u16_m128i(mtx[j]));
-        /* Fold 8 u16 to 4 using pairwise max */
-        uint16x4_t fold =
-            vpmax_u16(vget_low_u16(masked), vget_high_u16(masked));
-        fold = vpmax_u16(fold, fold);
-        fold = vpmax_u16(fold, fold);
-        res |= (vget_lane_u16(fold, 0) ? 1 : 0) << j;
+        res |= (_sse2neon_any_nonzero_u16x8(masked) ? 1U : 0U) << j;
     }
 #endif
     /* Mask result to valid range based on lb */
@@ -8568,7 +9250,8 @@ static uint16_t _sse2neon_aggregate_ranges_16x8(int la, int lb, __m128i mtx[16])
         uint16x8_t masked = vandq_u16(vec, vreinterpretq_u16_m128i(mtx[i])); \
         uint16x8_t swapped = vrev32q_u16(masked);                            \
         uint16x8_t pair_and = vandq_u16(masked, swapped);                    \
-        res |= (vmaxvq_u16(pair_and) ? 1U : 0U) << (i);                      \
+        res |= _sse2neon_static_cast(uint16_t,                               \
+                                     (vmaxvq_u16(pair_and) ? 1U : 0U) << i); \
     } while (0)
 
     uint16_t res = 0;
@@ -8627,12 +9310,13 @@ static uint16_t _sse2neon_aggregate_ranges_8x16(int la, int lb, __m128i mtx[16])
      * 3. Pair-AND: AND original with swapped to get [b0&b1, b0&b1, ...]
      * 4. Horizontal OR via vmaxvq_u8 (faster than vmaxvq_u16)
      */
-#define SSE2NEON_RANGES_MATCH8(i)                                          \
-    do {                                                                   \
-        uint8x16_t masked = vandq_u8(vec, vreinterpretq_u8_m128i(mtx[i])); \
-        uint8x16_t swapped = vrev16q_u8(masked);                           \
-        uint8x16_t pair_and = vandq_u8(masked, swapped);                   \
-        res |= (vmaxvq_u8(pair_and) ? 1U : 0U) << (i);                     \
+#define SSE2NEON_RANGES_MATCH8(i)                                              \
+    do {                                                                       \
+        uint8x16_t masked = vandq_u8(vec, vreinterpretq_u8_m128i(mtx[i]));     \
+        uint8x16_t swapped = vrev16q_u8(masked);                               \
+        uint8x16_t pair_and = vandq_u8(masked, swapped);                       \
+        res |= _sse2neon_static_cast(uint16_t, (vmaxvq_u8(pair_and) ? 1U : 0U) \
+                                                   << i);                      \
     } while (0)
 
     uint16_t res = 0;
@@ -9225,7 +9909,7 @@ FORCE_INLINE int _mm_cmpestra(__m128i a,
 {
     int lb_cpy = lb;
     SSE2NEON_COMP_AGG(a, b, la, lb, imm8, CMPESTRX);
-    return !r2 & (lb_cpy > bound);
+    return !r2 & (lb_cpy >= bound);
 }
 
 // Compare packed strings in a and b with lengths la and lb using the control in
@@ -9419,7 +10103,6 @@ FORCE_INLINE __m128i _mm_cmpgt_epi64(__m128i a, __m128i b)
 #endif
 }
 
-#if 0
 /* A function-like macro to generate CRC-32C calculation using Barrett
  * reduction.
  *
@@ -9428,6 +10111,7 @@ FORCE_INLINE __m128i _mm_cmpgt_epi64(__m128i a, __m128i b)
  * - 'v' means the element of input message.
  * - 'bit' means the element size of input message (e.g., if each message is one
  * byte then 'bit' will be 8 as 1 byte equals 8 bits.
+ * - 'shift' represents a toggle to perform shifting.
  *
  * For a reminder, the CRC calculation uses bit-reflected sense.
  *
@@ -9447,21 +10131,28 @@ FORCE_INLINE __m128i _mm_cmpgt_epi64(__m128i a, __m128i b)
  *    then shift left by 'bit' bits so that the result of carry-less
  *    multiplication will always appear in the upper half of destination vector.
  *    Doing so can reduce some masking and subtraction operations.
+ *    For one exception is that there is no need to perform shifting if 'bit'
+ *    is 64.
  * 3. Do carry-less multiplication on the lower half of 'tmp' with 'mu'.
  * 4. Do carry-less multiplication on the upper half of 'tmp' with 'p'.
  * 5. Extract the lower (in bit-reflected sense) 32 bits in the upper half of
  *    'tmp'.
  */
-#define SSE2NEON_CRC32C_BASE(crc, v, bit)                                                      \
-    do {                                                                                       \
-        crc ^= v;                                                                              \
-    uint64x2_t orig = vcombine_u64(vcreate_u64((uint64_t) (crc) << ((bit)), vcreate_u64(0x0)); \
-    uint64x2_t tmp = orig; \
-    uint64_t p = 0x105EC76F1; \
-    uint64_t mu = 0x1dea713f1; \
-    tmp = _sse2neon_vmull_p64(vget_low_u64(tmp), vcreate_u64(mu)); \
-    tmp = _sse2neon_vmull_p64(vget_high_u64(tmp), vcreate_u64(p)); \
-    crc = vgetq_lane_u32(vreinterpretq_u32_u64(tmp), 2);                                       \
+#define SSE2NEON_CRC32C_BASE(crc, v, bit, shift)                               \
+    do {                                                                       \
+        crc ^= v;                                                              \
+        uint64x2_t orig =                                                      \
+            vcombine_u64(_sse2neon_vcreate_u64(SSE2NEON_IIF(shift)(            \
+                             (uint64_t) (crc) << (bit), (uint64_t) (crc))),    \
+                         _sse2neon_vcreate_u64(0x0));                          \
+        uint64x2_t tmp = orig;                                                 \
+        uint64_t p = 0x105EC76F1;                                              \
+        uint64_t mu = 0x1dea713f1;                                             \
+        tmp =                                                                  \
+            _sse2neon_vmull_p64(vget_low_u64(tmp), _sse2neon_vcreate_u64(mu)); \
+        tmp =                                                                  \
+            _sse2neon_vmull_p64(vget_high_u64(tmp), _sse2neon_vcreate_u64(p)); \
+        crc = vgetq_lane_u32(vreinterpretq_u32_u64(tmp), 2);                   \
     } while (0)
 
 // Starting with the initial value in crc, accumulates a CRC32 value for
@@ -9469,16 +10160,16 @@ FORCE_INLINE __m128i _mm_cmpgt_epi64(__m128i a, __m128i b)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_crc32_u16
 FORCE_INLINE uint32_t _mm_crc32_u16(uint32_t crc, uint16_t v)
 {
-#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32)
+#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32) && !SSE2NEON_ARM64EC
     __asm__ __volatile__("crc32ch %w[c], %w[c], %w[v]\n\t"
                          : [c] "+r"(crc)
                          : [v] "r"(v));
-#elif ((__ARM_ARCH >= 8) && defined(__ARM_FEATURE_CRC32)) || \
-    (SSE2NEON_COMPILER_MSVC && SSE2NEON_ARCH_AARCH64 &&      \
+#elif ((__ARM_ARCH >= 8) && defined(__ARM_FEATURE_CRC32)) ||             \
+    (SSE2NEON_COMPILER_MSVC && defined(_M_ARM64) && !SSE2NEON_ARM64EC && \
      !SSE2NEON_COMPILER_CLANG)
     crc = __crc32ch(crc, v);
 #elif defined(__ARM_FEATURE_CRYPTO)
-    SSE2NEON_CRC32C_BASE(crc, v, 16);
+    SSE2NEON_CRC32C_BASE(crc, v, 16, 1);
 #else
     crc = _mm_crc32_u8(crc, _sse2neon_static_cast(uint8_t, v & 0xff));
     crc = _mm_crc32_u8(crc, _sse2neon_static_cast(uint8_t, (v >> 8) & 0xff));
@@ -9491,16 +10182,16 @@ FORCE_INLINE uint32_t _mm_crc32_u16(uint32_t crc, uint16_t v)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_crc32_u32
 FORCE_INLINE uint32_t _mm_crc32_u32(uint32_t crc, uint32_t v)
 {
-#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32)
+#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32) && !SSE2NEON_ARM64EC
     __asm__ __volatile__("crc32cw %w[c], %w[c], %w[v]\n\t"
                          : [c] "+r"(crc)
                          : [v] "r"(v));
-#elif ((__ARM_ARCH >= 8) && defined(__ARM_FEATURE_CRC32)) || \
-    (SSE2NEON_COMPILER_MSVC && SSE2NEON_ARCH_AARCH64 &&      \
+#elif ((__ARM_ARCH >= 8) && defined(__ARM_FEATURE_CRC32)) ||             \
+    (SSE2NEON_COMPILER_MSVC && defined(_M_ARM64) && !SSE2NEON_ARM64EC && \
      !SSE2NEON_COMPILER_CLANG)
     crc = __crc32cw(crc, v);
 #elif defined(__ARM_FEATURE_CRYPTO)
-    SSE2NEON_CRC32C_BASE(crc, v, 32);
+    SSE2NEON_CRC32C_BASE(crc, v, 32, 1);
 #else
     crc = _mm_crc32_u16(crc, _sse2neon_static_cast(uint16_t, v & 0xffff));
     crc =
@@ -9514,13 +10205,15 @@ FORCE_INLINE uint32_t _mm_crc32_u32(uint32_t crc, uint32_t v)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_crc32_u64
 FORCE_INLINE uint64_t _mm_crc32_u64(uint64_t crc, uint64_t v)
 {
-#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32)
+#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32) && !SSE2NEON_ARM64EC
     __asm__ __volatile__("crc32cx %w[c], %w[c], %x[v]\n\t"
                          : [c] "+r"(crc)
                          : [v] "r"(v));
-#elif (SSE2NEON_COMPILER_MSVC && SSE2NEON_ARCH_AARCH64 && \
+#elif (SSE2NEON_COMPILER_MSVC && defined(_M_ARM64) && !SSE2NEON_ARM64EC && \
        !SSE2NEON_COMPILER_CLANG)
     crc = __crc32cd(_sse2neon_static_cast(uint32_t, crc), v);
+#elif defined(__ARM_FEATURE_CRYPTO)
+    SSE2NEON_CRC32C_BASE(crc, v, 64, 0);
 #else
     crc = _mm_crc32_u32(_sse2neon_static_cast(uint32_t, crc),
                         _sse2neon_static_cast(uint32_t, v & 0xffffffff));
@@ -9536,16 +10229,16 @@ FORCE_INLINE uint64_t _mm_crc32_u64(uint64_t crc, uint64_t v)
 // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_crc32_u8
 FORCE_INLINE uint32_t _mm_crc32_u8(uint32_t crc, uint8_t v)
 {
-#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32)
+#if SSE2NEON_ARCH_AARCH64 && defined(__ARM_FEATURE_CRC32) && !SSE2NEON_ARM64EC
     __asm__ __volatile__("crc32cb %w[c], %w[c], %w[v]\n\t"
                          : [c] "+r"(crc)
                          : [v] "r"(v));
-#elif ((__ARM_ARCH >= 8) && defined(__ARM_FEATURE_CRC32)) || \
-    (SSE2NEON_COMPILER_MSVC && SSE2NEON_ARCH_AARCH64 &&      \
+#elif ((__ARM_ARCH >= 8) && defined(__ARM_FEATURE_CRC32)) ||             \
+    (SSE2NEON_COMPILER_MSVC && defined(_M_ARM64) && !SSE2NEON_ARM64EC && \
      !SSE2NEON_COMPILER_CLANG)
     crc = __crc32cb(crc, v);
 #elif defined(__ARM_FEATURE_CRYPTO)
-    SSE2NEON_CRC32C_BASE(crc, v, 8);
+    SSE2NEON_CRC32C_BASE(crc, v, 8, 1);
 #else  // Fall back to the generic table lookup approach
     // Adapted from: https://create.stephan-brumme.com/crc32/
     // Apply half-byte comparison algorithm for the best ratio between
@@ -9566,12 +10259,14 @@ FORCE_INLINE uint32_t _mm_crc32_u8(uint32_t crc, uint8_t v)
 #endif
     return crc;
 }
-#endif
 
 /* AES */
 
-#if !defined(__ARM_FEATURE_CRYPTO) && \
-    ((!defined(_M_ARM64) && !defined(_M_ARM64EC)) || defined(__clang__))
+/* AES software fallback tables.
+ * Needed when __ARM_FEATURE_CRYPTO is not available, OR on ARM64EC where
+ * hardware crypto intrinsics may not be accessible despite the feature macro.
+ */
+#if !defined(__ARM_FEATURE_CRYPTO) || SSE2NEON_ARM64EC || defined(_M_ARM64EC)
 /* clang-format off */
 #define SSE2NEON_AES_SBOX(w)                                           \
     {                                                                  \
@@ -9663,21 +10358,28 @@ static const uint8_t _sse2neon_rsbox[256] = SSE2NEON_AES_RSBOX(SSE2NEON_AES_H0);
 
 #if SSE2NEON_ARCH_AARCH64
 // NEON S-box lookup using 4x64-byte tables; reused by aesenc/dec/keygenassist.
+// Uses vsubq_u8 instead of C++ operator- for MSVC compatibility.
 FORCE_INLINE uint8x16_t _sse2neon_aes_subbytes(uint8x16_t x)
 {
     uint8x16_t v = vqtbl4q_u8(_sse2neon_vld1q_u8_x4(_sse2neon_sbox), x);
-    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_sbox + 0x40), x - 0x40);
-    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_sbox + 0x80), x - 0x80);
-    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_sbox + 0xc0), x - 0xc0);
+    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_sbox + 0x40),
+                   vsubq_u8(x, vdupq_n_u8(0x40)));
+    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_sbox + 0x80),
+                   vsubq_u8(x, vdupq_n_u8(0x80)));
+    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_sbox + 0xc0),
+                   vsubq_u8(x, vdupq_n_u8(0xc0)));
     return v;
 }
 
 FORCE_INLINE uint8x16_t _sse2neon_aes_inv_subbytes(uint8x16_t x)
 {
     uint8x16_t v = vqtbl4q_u8(_sse2neon_vld1q_u8_x4(_sse2neon_rsbox), x);
-    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_rsbox + 0x40), x - 0x40);
-    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_rsbox + 0x80), x - 0x80);
-    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_rsbox + 0xc0), x - 0xc0);
+    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_rsbox + 0x40),
+                   vsubq_u8(x, vdupq_n_u8(0x40)));
+    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_rsbox + 0x80),
+                   vsubq_u8(x, vdupq_n_u8(0x80)));
+    v = vqtbx4q_u8(v, _sse2neon_vld1q_u8_x4(_sse2neon_rsbox + 0xc0),
+                   vsubq_u8(x, vdupq_n_u8(0xc0)));
     return v;
 }
 #endif
@@ -9719,15 +10421,15 @@ FORCE_INLINE __m128i _mm_aesenc_si128(__m128i a, __m128i RoundKey)
     v = _sse2neon_aes_subbytes(w);
 
     /* mix columns */
-    w = (v << 1) ^
-        _sse2neon_reinterpret_cast(
-            uint8x16_t,
-            ((_sse2neon_reinterpret_cast(int8x16_t, v) >> 7) & 0x1b));
-    w ^= vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v)));
-    w ^= vqtbl1q_u8(v ^ w, vld1q_u8(ror32by8));
+    w = veorq_u8(vshlq_n_u8(v, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(v), 7), vdupq_n_s8(0x1b))));
+    w = veorq_u8(w, vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v))));
+    w = veorq_u8(w, vqtbl1q_u8(veorq_u8(v, w), vld1q_u8(ror32by8)));
 
     /* add round key */
-    return vreinterpretq_m128i_u8(w) ^ RoundKey;
+    return vreinterpretq_m128i_u8(
+        veorq_u8(w, vreinterpretq_u8_m128i(RoundKey)));
 
 #else /* ARMv7-A implementation for a table-based AES */
 #define SSE2NEON_AES_B2W(b0, b1, b2, b3)                 \
@@ -9811,19 +10513,25 @@ FORCE_INLINE __m128i _mm_aesdec_si128(__m128i a, __m128i RoundKey)
 
     // inverse mix columns
     // multiplying 'v' by 4 in GF(2^8)
-    w = (v << 1) ^ vreinterpretq_u8_s8((vreinterpretq_s8_u8(v) >> 7) & 0x1b);
-    w = (w << 1) ^ vreinterpretq_u8_s8((vreinterpretq_s8_u8(w) >> 7) & 0x1b);
-    v ^= w;
-    v ^= vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(w)));
+    w = veorq_u8(vshlq_n_u8(v, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(v), 7), vdupq_n_s8(0x1b))));
+    w = veorq_u8(vshlq_n_u8(w, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(w), 7), vdupq_n_s8(0x1b))));
+    v = veorq_u8(v, w);
+    v = veorq_u8(v, vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(w))));
 
-    w = (v << 1) ^
-        vreinterpretq_u8_s8((vreinterpretq_s8_u8(v) >> 7) &
-                            0x1b);  // multiplying 'v' by 2 in GF(2^8)
-    w ^= vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v)));
-    w ^= vqtbl1q_u8(v ^ w, vld1q_u8(ror32by8));
+    // multiplying 'v' by 2 in GF(2^8)
+    w = veorq_u8(vshlq_n_u8(v, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(v), 7), vdupq_n_s8(0x1b))));
+    w = veorq_u8(w, vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v))));
+    w = veorq_u8(w, vqtbl1q_u8(veorq_u8(v, w), vld1q_u8(ror32by8)));
 
     // add round key
-    return vreinterpretq_m128i_u8(w) ^ RoundKey;
+    return vreinterpretq_m128i_u8(
+        veorq_u8(w, vreinterpretq_u8_m128i(RoundKey)));
 
 #else /* ARMv7-A implementation using inverse T-tables */
     // GF(2^8) multiplication helpers for InvMixColumns coefficients
@@ -9921,7 +10629,8 @@ FORCE_INLINE __m128i _mm_aesenclast_si128(__m128i a, __m128i RoundKey)
     v = _sse2neon_aes_subbytes(w);
 
     // add round key
-    return vreinterpretq_m128i_u8(v) ^ RoundKey;
+    return vreinterpretq_m128i_u8(
+        veorq_u8(v, vreinterpretq_u8_m128i(RoundKey)));
 
 #else /* ARMv7-A implementation */
     uint8_t v[16] = {
@@ -10085,7 +10794,8 @@ FORCE_INLINE __m128i _mm_aesdeclast_si128(__m128i a, __m128i RoundKey)
     v = _sse2neon_aes_inv_subbytes(w);
 
     // add round key
-    return vreinterpretq_m128i_u8(v) ^ RoundKey;
+    return vreinterpretq_m128i_u8(
+        veorq_u8(v, vreinterpretq_u8_m128i(RoundKey)));
 
 #else /* ARMv7-A implementation */
     // Inverse shift rows indices: 0,13,10,7,4,1,14,11,8,5,2,15,12,9,6,3
@@ -10125,15 +10835,21 @@ FORCE_INLINE __m128i _mm_aesimc_si128(__m128i a)
     uint8x16_t w;
 
     // multiplying 'v' by 4 in GF(2^8)
-    w = (v << 1) ^ vreinterpretq_u8_s8((vreinterpretq_s8_u8(v) >> 7) & 0x1b);
-    w = (w << 1) ^ vreinterpretq_u8_s8((vreinterpretq_s8_u8(w) >> 7) & 0x1b);
-    v ^= w;
-    v ^= vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(w)));
+    w = veorq_u8(vshlq_n_u8(v, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(v), 7), vdupq_n_s8(0x1b))));
+    w = veorq_u8(vshlq_n_u8(w, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(w), 7), vdupq_n_s8(0x1b))));
+    v = veorq_u8(v, w);
+    v = veorq_u8(v, vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(w))));
 
     // multiplying 'v' by 2 in GF(2^8)
-    w = (v << 1) ^ vreinterpretq_u8_s8((vreinterpretq_s8_u8(v) >> 7) & 0x1b);
-    w ^= vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v)));
-    w ^= vqtbl1q_u8(v ^ w, vld1q_u8(ror32by8));
+    w = veorq_u8(vshlq_n_u8(v, 1),
+                 vreinterpretq_u8_s8(vandq_s8(
+                     vshrq_n_s8(vreinterpretq_s8_u8(v), 7), vdupq_n_s8(0x1b))));
+    w = veorq_u8(w, vreinterpretq_u8_u16(vrev32q_u16(vreinterpretq_u16_u8(v))));
+    w = veorq_u8(w, vqtbl1q_u8(veorq_u8(v, w), vld1q_u8(ror32by8)));
     return vreinterpretq_m128i_u8(w);
 
 #else /* ARMv7-A NEON implementation */

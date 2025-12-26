@@ -58,6 +58,7 @@ typedef struct {
 	PinmameDisplayLayout layout;
 	void* pData;
 	int size;
+	unsigned int frameId;
 } PinmameDisplay;
 
 static std::vector<PinmameDisplay*> _displays;
@@ -247,11 +248,28 @@ int GetGameNumFromString(const char* const name)
  * UpdatePinmameDisplayBitmap
  ******************************************************/
 
-int UpdatePinmameDisplayBitmap(PinmameDisplay* pDisplay, const struct mame_bitmap* p_bitmap)
+bool UpdatePinmameDisplayBitmap(PinmameDisplay* pDisplay, struct mame_bitmap* p_bitmap)
 {
-	UINT8* __restrict dst = (UINT8*)pDisplay->pData;
-	int diff = 0;
+	UINT8* __restrict const dst = (UINT8*)pDisplay->pData;
+	bool diff = false;
+	const int height = pDisplay->layout.height; // layout->start
+	const int width = pDisplay->layout.width; // layout->length
+	const int rotation = (pDisplay->layout.type & PINMAME_DISPLAY_TYPE_VIDEO_ROT90) ? 1 : 0;
+	const int incr = (rotation == 0) ? 3 : ((rotation == 1) ? height*3 : -height*3);
+	for (int y = 0; y < height; y++) {
+		int pos = (rotation == 0) ? y*width : ((rotation == 1) ? (height - 1 - y) : (y + (width - 1)*height));
+		pos *= 3;
+		for (int x = 0; x < width; x++,pos+=incr) {
+			UINT8 r,g,b;
+			palette_get_color(p_bitmap->read(p_bitmap, /*cliprect->min_x +*/ x, /*cliprect->min_y +*/ y), &r, &g, &b);
+			diff |= (dst[pos] != r || dst[pos + 1] != g || dst[pos + 2] != b);
+			dst[pos    ] = r;
+			dst[pos + 1] = g;
+			dst[pos + 2] = b;
+		}
+	}
 
+	/* Optimized implementation but missing rotation support
 	if (p_bitmap->depth == 8) {
 		for(int j = 0; j < pDisplay->layout.height; j++) {
 			const UINT8* __restrict src = (UINT8*)p_bitmap->line[j];
@@ -259,7 +277,7 @@ int UpdatePinmameDisplayBitmap(PinmameDisplay* pDisplay, const struct mame_bitma
 				UINT8 r,g,b;
 				palette_get_color((*src++),&r,&g,&b);
 				if (dst[0] != r || dst[1] != g || dst[2] != b)
-					diff = 1;
+					diff = true;
 				*(dst++) = r;
 				*(dst++) = g;
 				*(dst++) = b;
@@ -267,13 +285,13 @@ int UpdatePinmameDisplayBitmap(PinmameDisplay* pDisplay, const struct mame_bitma
 		}
 	}
 	else if(p_bitmap->depth == 15 || p_bitmap->depth == 16) {
-		for(int j = 0; j < pDisplay->layout.height; j++) {
-			const UINT16* __restrict src = (UINT16*)p_bitmap->line[j];
-			for(int i=0; i < pDisplay->layout.width; i++) {
+		for(int y = 0; y < pDisplay->layout.height; y++) {
+			const UINT16* __restrict src = (UINT16*)p_bitmap->line[y];
+			for(int x=0; x < pDisplay->layout.width; x++) {
 				UINT8 r,g,b;
 				palette_get_color((*src++),&r,&g,&b);
 				if (dst[0] != r || dst[1] != g || dst[2] != b)
-					diff = 1;
+					diff = true;
 				*(dst++) = r;
 				*(dst++) = g;
 				*(dst++) = b;
@@ -287,13 +305,13 @@ int UpdatePinmameDisplayBitmap(PinmameDisplay* pDisplay, const struct mame_bitma
 				UINT8 r,g,b;
 				palette_get_color((*src++),&r,&g,&b);
 				if (dst[0] != r || dst[1] != g || dst[2] != b)
-					diff = 1;
+					diff = true;
 				*(dst++) = r;
 				*(dst++) = g;
 				*(dst++) = b;
 			}
 		}
-	}
+	}*/
 
 	return diff;
 }
@@ -432,33 +450,32 @@ extern "C" int libpinmame_time_to_quit(void)
 
 extern "C" int libpinmame_needs_update_display() { return _p_Config->cb_OnDisplayUpdated != nullptr; }
 
-extern "C" void libpinmame_update_display(int index, void* p_data)
+extern "C" void libpinmame_update_display(const struct core_dispLayout* layout, void* p_data)
 {
-	if (!_p_Config->cb_OnDisplayUpdated)
-		return;
-
-   // If index is -1, update the custom DMD generated from alphanumeric segment displays
-	if (index == -1)
-		index = _displays.size() - 1;
-
+	// If layout is null, update the custom DMD generated from alphanumeric segment displays
+	int index = layout == nullptr ? (_displays.size() - 1) : layout->index;
 	PinmameDisplay* pDisplay = _displays[index];
-	if (pDisplay->layout.type == CORE_VIDEO) {
-		if (UpdatePinmameDisplayBitmap(pDisplay, (mame_bitmap*)p_data))
-			(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
-		else
-			(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
+	if ((pDisplay->layout.type & CORE_SEGMASK) == CORE_VIDEO) {
+		const bool changed = UpdatePinmameDisplayBitmap(pDisplay, (mame_bitmap*)p_data);
+		if (changed)
+			pDisplay->frameId++;
+		if (_p_Config->cb_OnDisplayUpdated)
+			(*(_p_Config->cb_OnDisplayUpdated))(index, changed ? pDisplay->pData : nullptr, &pDisplay->layout, _p_userData);
 	}
-	else if ((pDisplay->layout.type & CORE_SEGALL) == CORE_DMD) {
-		if (memcmp(pDisplay->pData, p_data, pDisplay->size)) {
-			memcpy(pDisplay->pData, p_data, pDisplay->size);
-			(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
+	else if (_p_Config->cb_OnDisplayUpdated) {
+		if ((pDisplay->layout.type & CORE_SEGMASK) == CORE_DMD) {
+			if (memcmp(pDisplay->pData, p_data, pDisplay->size)) {
+				memcpy(pDisplay->pData, p_data, pDisplay->size);
+				pDisplay->frameId++;
+				(*(_p_Config->cb_OnDisplayUpdated))(index, pDisplay->pData, &pDisplay->layout, _p_userData);
+			}
+			else
+				(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
 		}
 		else
+		{
 			(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
-	}
-	else
-	{
-		(*(_p_Config->cb_OnDisplayUpdated))(index, nullptr, &pDisplay->layout, _p_userData);
+		}
 	}
 }
 
@@ -525,7 +542,7 @@ extern "C" void OnStateChange(const int state)
 				layout = parent_layout;
 				parent_layout = NULL;
 			}
-			if (layout->type == CORE_IMPORT) {
+			if ((layout->type & CORE_SEGMASK) == CORE_IMPORT) {
 				assert(parent_layout == NULL); // IMPORT of IMPORT is not currently supported as it is not used by any driver so far
 				parent_layout = layout + 1;
 				layout = layout->importedLayout - 1;
@@ -537,13 +554,13 @@ extern "C" void OnStateChange(const int state)
 			pDisplay->layout.type = (PINMAME_DISPLAY_TYPE)layout->type;
 			pDisplay->layout.top = layout->top;
 			pDisplay->layout.left = layout->left;
-			if (layout->type == CORE_VIDEO) {
+			if ((layout->type & CORE_SEGMASK) == CORE_VIDEO) {
 				pDisplay->layout.width = layout->length;
 				pDisplay->layout.height = layout->start;
 				pDisplay->layout.depth = 24;
 				pDisplay->size = pDisplay->layout.width * pDisplay->layout.height * 3;
 			}
-			else if ((layout->type & CORE_DMD) == CORE_DMD) {
+			else if ((layout->type & CORE_SEGMASK) == CORE_DMD) {
 				pDisplay->layout.width = layout->length;
 				pDisplay->layout.height = layout->start;
 				const int shade_16_enabled = (core_gameData->gen & (GEN_SAM | GEN_SPA | GEN_ALVG | GEN_ALVG_DMD2 | GEN_GTS3)) != 0;
@@ -567,7 +584,7 @@ extern "C" void OnStateChange(const int state)
 		{
 			PinmameDisplay* pDisplay = new PinmameDisplay();
 			memset(pDisplay, 0, sizeof(PinmameDisplay));
-			pDisplay->layout.type = (PINMAME_DISPLAY_TYPE)(PINMAME_DISPLAY_TYPE_DMD | PINMAME_DISPLAY_TYPE_DMDSEG);
+			pDisplay->layout.type = PINMAME_DISPLAY_TYPE_DMD;
 			pDisplay->layout.top = 0;
 			pDisplay->layout.left = 0;
 			pDisplay->layout.width = 128;
@@ -693,7 +710,7 @@ int StartGame(const int gameNum)
  * PinmameGetGame
  ******************************************************/
 
-PINMAMEAPI PINMAME_STATUS PinmameGetGame(const char* const p_name, PinmameGameCallback callback, const void* p_userData)
+PINMAMEAPI PINMAME_STATUS PinmameGetGame(const char* const p_name, PinmameGameCallback callback, void* const p_userData)
 {
 	if (!_p_Config)
 		return PINMAME_STATUS_CONFIG_NOT_SET;
@@ -725,7 +742,7 @@ PINMAMEAPI PINMAME_STATUS PinmameGetGame(const char* const p_name, PinmameGameCa
  * PinmameGetGames
  ******************************************************/
 
-PINMAMEAPI PINMAME_STATUS PinmameGetGames(PinmameGameCallback callback, const void* p_userData)
+PINMAMEAPI PINMAME_STATUS PinmameGetGames(PinmameGameCallback callback, void* const p_userData)
 {
 	if (!_p_Config)
 		return PINMAME_STATUS_CONFIG_NOT_SET;
@@ -998,7 +1015,7 @@ PINMAMEAPI void PinmameStop()
 	_timeToQuit = 0;
 
 	for (PinmameDisplay* pDisplay : _displays) {
-		if (pDisplay->pData)
+		if (pDisplay && pDisplay->pData)
 			free(pDisplay->pData);
 
 		delete pDisplay;
@@ -1446,7 +1463,7 @@ PINMAMEAPI int PinmameGetChangedNVRAM(PinmameNVRAMState* const p_nvramStates)
  * PinmameSetUserData
  ******************************************************/
 
-PINMAMEAPI void PinmameSetUserData(const void* p_userData)
+PINMAMEAPI void PinmameSetUserData(void* const p_userData)
 {
 	_p_userData = (void*)p_userData;
 }
