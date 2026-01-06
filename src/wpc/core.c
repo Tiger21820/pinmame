@@ -999,22 +999,20 @@ static void core_dmd_render_internal(struct mame_bitmap *bitmap, const int x, co
 // Send data to legacy LibPinMAME callbacks (similar processing as VPinMAME but without color LUT, and with a global flag to select luminance/bitplanes)
 #ifdef LIBPINMAME
 void core_dmd_send_libpinmame(const core_tLCDLayout* dmdLayout, const float* const dmdDotLum, const UINT8* const dmdDotRaw) {
-   core_tLCDLayout* layout = core_gameData->lcdLayout;
-   core_tLCDLayout* parent_layout = NULL;
-   const int size = layout->length * layout->start;
+   const int size = dmdLayout->length * dmdLayout->start;
    if (g_fDmdMode == 0) { // PINMAME_DMD_MODE_BRIGHTNESS
       UINT8* rawLum = g_raw_dmdbuffer;
       for (int ii = 0; ii < size; ii++)
          (*rawLum++) = (UINT8)(255.f * dmdDotLum[ii]); // Legacy API with quantization issues
       if (memcmp(g_old_raw_dmdbuffer, g_raw_dmdbuffer, size) != 0) {
          memcpy(g_old_raw_dmdbuffer, g_raw_dmdbuffer, size);
-         libpinmame_update_display(layout, g_raw_dmdbuffer);
+         libpinmame_update_display(dmdLayout, g_raw_dmdbuffer);
       }
    }
    else if (g_fDmdMode == 1) { // PINMAME_DMD_MODE_RAW
       if (memcmp(g_raw_dmdbuffer, dmdDotRaw, size) != 0) {
          memcpy(g_raw_dmdbuffer, dmdDotRaw, size);
-         libpinmame_update_display(layout, g_raw_dmdbuffer);
+         libpinmame_update_display(dmdLayout, g_raw_dmdbuffer);
       }
    }
 }
@@ -3427,6 +3425,7 @@ void core_dmd_pwm_init(const core_tLCDLayout* layout, const int filter, const in
       dmd_state->fir_size = dmd_state->nFrames = sizeof(fir_230_15) / sizeof(UINT32);
     }
     break;
+  case CORE_DMD_PWM_FILTER_ALVG1: // Alvin G. DMD Generation 1: 293.7Hz refresh rate / 15Hz low pass filter / 4 frames PWM pattern
   case CORE_DMD_PWM_FILTER_ALVG2: // Alvin G. DMD Generation 2: 298.6Hz refresh rate / 15Hz low pass filter / 4 frames PWM pattern
     {
       static const UINT32 fir_299_15[] = { 2410896, 9610314, 28210405, 66396021, 128313971, 211717997, 307413991, 400841556, 475445398, 516893726, 516893726, 475445398, 400841556, 307413991, 211717997, 128313971, 66396021, 28210405, 9610314, 2410896 };
@@ -3435,7 +3434,6 @@ void core_dmd_pwm_init(const core_tLCDLayout* layout, const int filter, const in
     }
     break;
   case CORE_DMD_PWM_FILTER_GTS3: // GTS3: 376Hz refresh rate / 15Hz low pass filter / 1,3,6,8,10 frames PWM pattern
-  case CORE_DMD_PWM_FILTER_ALVG1: // FIXME frame rate seems too high to be true (so we use the 376Hz) / Alvin G. DMD Generation 1: 1194.4Hz refresh rate / 15Hz low pass filter / 4 frames PWM pattern
     {
       static const UINT32 fir_376_15[] = { 487657, 3888687, 10976383, 24969201, 48529031, 83073390, 128267628, 181813266, 239594638, 296177312, 345582023, 382201229, 401693831, 401693831, 382201229, 345582023, 296177312, 239594638, 181813266, 128267628, 83073390, 48529031, 24969201, 10976383, 3888687, 487657 };
       dmd_state->fir_weights = fir_376_15;
@@ -3795,6 +3793,7 @@ UINT8* core_dmd_update_identify(const core_tLCDLayout* layout, unsigned int * ra
      dmd_state->rawFrameId++;
   }
   
+  *rawFrameId = dmd_state->rawFrameId;
   return dmd_state->bitplaneFrame;
 }
 
