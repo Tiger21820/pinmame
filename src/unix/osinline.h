@@ -8,15 +8,6 @@
 #if defined svgalib || defined x11 || defined ggi || defined openstep || defined SDL
 extern unsigned char *dirty_lines;
 extern unsigned char **dirty_blocks;
-
-#define osd_mark_vector_dirty(x,y) \
-{ \
-   dirty_lines[(y)>>3] = 1; \
-   dirty_blocks[(y)>>3][(x)>>3] = 1; \
-}
-
-#else
-#define osd_mark_vector_dirty(x,y)
 #endif
 
 #ifdef X86_ASM
