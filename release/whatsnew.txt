@@ -11,12 +11,14 @@ to attach to the WPC/WPC95 serial printer interface.
 
 Workaround a crash / race-condition when reading PinMAME state, e.g. when exiting VPX
 
+Cleanup PinMAME32 UI a bit (historic/leftover MAME options like vector display, trackball or lightgun)
+
 VS2026 build support
 
 *** CORE/CPU ***
 Fixed a potential small problem with Bally VideoPins sound emulation
 Added physical/PWM DMD support to Capcom games (potentially leading to more brightness levels being displayed if the CPU triggers it)
-Added physical/PWM segment support to System 11 games
+Added physical/PWM (dimmed) segment support to System 11 games
 Fixed physical/PWM GameOn & switched solenoid state being overwritten for System 11 games
 Fixed physical/PWM GameOn and J111 outputs for WPC games
 Added physical/PWM support to CFTBL backglass flashers
@@ -24,11 +26,15 @@ Added physical/PWM lamps & solenoids support to Bally 6803 games
 Added physical/PWM lamps & solenoids support to Zaccaria games
 Added physical/PWM support to Alvin G. games
 Added physical/PWM lamps and/or solenoids support to some GTS80 games (Amazon Hunt II, Bad Girls, Big House, Bounty Hunter, Genesis, Rock)
+Added physical/PWM (dimmed) segment support to GTS80A games
 Added physical/PWM support to Star Wars Trilogy and Titanic
 Added physical/PWM support to games employing mini-DMDs and the like
 Fixed some potential general solenoid issues with physical/PWM
 Improved physical/PWM bulb integration
 Improved BY6803 emulation, and add dimmed segments support, and bright physical/PWM lights
+Improved Alvin G. first generation DMD simulation
+In general, (almost) all DMD/mini-DMD outputs have been moved to the proper physical/PWM pipeline, allowing for more subtle effects
+Implemented memory protect logic/coin-door-switch on Sega/Stern WhiteStar games: Previously, the coin door was always considered to be open, but the coin door message doesn't get displayed if the door is already open on boot. It will only display after the door has been closed and then reopened.
 Fixed trolls in Medieval Madness
 Improved sound for Metal Man, and a bit for Jolly Park and Verne's World (in general, slightly more authentic MSM5205 sound)
 Slightly improved YM262 sound for Sir Lancelot
@@ -37,7 +43,7 @@ Fixed VGM recording for machines using OKI6295 sound
 Added VGM recording for machines using BSMT2000 sound (WIP, as support is also WIP in libvgm,MAME-vgmplay,etc)
 Fixed flipped left/right channel for Alvin G. BSMT2000 sound (must have regressed at some point when extending the BSMT2000 core)
 
-*** ROM SUPPORT *** Thanks to Tom Collins, Paul Swan, Dieter Werner, Victor Fernandez, Jordi Beltran, ipdb.org, Billc479, Scott Charles, inkochnito, frisbez, Chad Hendrickson
+*** ROM SUPPORT *** Thanks to Tom Collins, Paul Swan, Dieter Werner, Victor Fernandez, Jordi Beltran, ipdb.org, Billc479, Scott Charles, inkochnito, frisbez, Chad Hendrickson, idealjoker
 Correct Dumps:
 DE: Batman 1.06 (just using correct name for the display rom (1.02 instead of 1.06))
 Gottlieb: renamed Monte Carlo (German) to German rev.1
@@ -58,6 +64,7 @@ Gorgar L-2 (most likely official, but unreleased so far, makes it the newest ver
 High Speed (G-4 aka German PROTO4)
 Maverick 4.04 (German, Display 4.00)
 Monte Carlo (German) (most likely older revision than existing one, see above)
+Pin-Bot J-5 (PEMBOT (no relation)) (MOD)
 Police Force LX-5a (MOD)
 Rollergames TA-2 (LA-2C competition MOD based Tournament Edition)
 Rolling Stones V21 (unreleased so far, makes it the newest version available)

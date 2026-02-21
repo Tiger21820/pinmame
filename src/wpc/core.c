@@ -2618,6 +2618,7 @@ static MACHINE_STOP(core) {
       free(locals.dmdStates[i]->bitplaneFrame);
       free(locals.dmdStates[i]->luminanceFrame);
       free(locals.dmdStates[i]);
+      locals.dmdStates[i] = NULL;
     }
   }
 
@@ -3604,14 +3605,14 @@ UINT8* core_dmd_update_identify(const core_tLCDLayout* layout, unsigned int * ra
 {
   core_tDMDPWMState* const dmd_state = locals.dmdStates[layout->index];
 
-  // No processing required as there weren't any new frame submitted
+  // No processing required as there weren't any new frames submitted
   if (dmd_state->lastRawFrameIndex == dmd_state->frame_index) {
      *rawFrameId = dmd_state->rawFrameId;
      return dmd_state->bitplaneFrame;
   }
   dmd_state->lastRawFrameIndex = dmd_state->frame_index;
 
-  // Compute combined bitplane frames as they used to be for backward compatibility with colorization plugins
+  // Compute combined bitplane frames as these are used for legacy/backwards compatibility, e.g. with colorization plugins
   switch (dmd_state->raw_combiner) {
   case CORE_DMD_PWM_PREINTEGRATED_LINEAR_4: // Pre-integrated PWM frames, nothing to do beside a copy (could be optimized to avoid the copy but kept for simplicity)
   case CORE_DMD_PWM_PREINTEGRATED_SAM:
@@ -3758,7 +3759,7 @@ UINT8* core_dmd_update_identify(const core_tLCDLayout* layout, unsigned int * ra
       for (int kk = 0; kk < dmd_state->rawFrameSize; kk++) {
         UINT8 v0 = frame0[kk], v1 = frame1[kk], v2 = frame2[kk], v3 = frame3[kk];
         for (int ii = 0; ii < 8; ii++, v0 <<= 1, v1 <<= 1, v2 <<= 1, v3 <<= 1)
-          *rawData++ = level[((v0 >> 7) & 0x01) + ((v1 >> 7) & 0x01) + ((v1 >> 7) & 0x02) + ((v3 >> 7) & 0x01)];
+          *rawData++ = level[((v0 >> 7) & 0x01) + ((v1 >> 7) & 0x01) + ((v2 >> 7) & 0x01) + ((v3 >> 7) & 0x01)];
       }
     }
     break;
