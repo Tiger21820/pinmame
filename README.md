@@ -1,5 +1,5 @@
 # PinMAME
-1
+
 *Pinball Multiple Arcade Machine Emulator*
 
 ## What is it?
