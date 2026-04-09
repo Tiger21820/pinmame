@@ -1,7 +1,7 @@
 # PinMAME
 
 *Pinball Multiple Arcade Machine Emulator*
-0
+
 ## What is it?
 
 PinMAME emulates the hardware found in almost every solid state pinball machine created from
