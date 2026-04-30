@@ -160,12 +160,14 @@ DRIVERNV(pwerplay)      //BY17-724: 01/78 Power Play
 DRIVERNV(pwerplab)      //          10/08 Power Play (Free Play)
 DRIVERNV(pwerplac)      //          12/18 Power Play (Free Play+)
 DRIVERNV(matahari)      //BY17-725: 04/78 Mata Hari
-DRIVERNV(matatest)      //          ??/06 Mata Hari (New game rules)
+DRIVERNV(matatest)      //          ??/06 Mata Hari (New game rules MOD)
 DRIVERNV(mataharb)      //          10/08 Mata Hari (Free Play)
 DRIVERNV(mataharc)      //          02/19 Mata Hari (Free Play+)
+DRIVERNV(matahard)      //          04/25 Mata Hari (Free Play and MODified rules)
+DRIVERNV(matahard7)     //          04/25 Mata Hari (Free Play and MODified rules, 7-digit)
 DRIVERNV(blackjck)      //BY17-728: 06/78 Black Jack
 DRIVERNV(blackjcb)      //          10/08 Black Jack (Free Play)
-DRIVERNV(blackjcc)      //          04/18 Black Jack (Saucer points modification)
+DRIVERNV(blackjcc)      //          04/18 Black Jack (Saucer points MOD)
 DRIVERNV(blackjcd)      //          12/18 Black Jack (Free Play+)
 DRIVERNV(stk_sprs)      //BY17-740: 06/78 Strikes and Spares
 DRIVERNV(stk_sprb)      //          10/08 Strikes and Spares (Free Play)
@@ -342,6 +344,7 @@ DRIVERNV(beatclc2)      //          11/85 Beat the Clock (with flasher support)
 DRIVERNV(ladyluck)      //6803-0E34:02/86 Lady Luck
 DRIVERNV(motrdomb)      //6803-0E14:05/86 MotorDome (rev. B)
 DRIVERNV(motrdome)      //          06/86 MotorDome (rev. D)
+DRIVERNV(motrdomf)      //          11/86 MotorDome (rev. F)
 DRIVERNV(motrdomg)      //6803-0E69:07/86 MotorDome (German rev. B)
                         //6803-????:06/86 Karate Fight (Prototype for Black Belt?)
 DRIVERNV(blackblt)      //6803-0E52:07/86 Black Belt
