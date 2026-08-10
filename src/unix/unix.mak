@@ -184,6 +184,10 @@ ifdef LISY_X
 include src/lisy/lisy.mak
 endif
 
+ifdef P2K
+include src/p2k/p2k.mak
+endif
+
 ifdef DEBUG
 DBGDEFS = -DMAME_DEBUG
 else
@@ -322,23 +326,33 @@ ifdef EFENCE
 MY_LIBS += -lefence
 endif
 
+ifdef REMOTE_DEBUG
+CORE_OBJDIRS += $(OBJ)/remote_debug
+
+src/remote_debug/ui_html.h: src/remote_debug/ui.html
+	$(CC_COMMENT) @echo 'Compiling HTML $< ... $@'
+	xxd -i src/remote_debug/ui.html > src/remote_debug/ui_html.h
+
+$(OBJ)/remote_debug/api_handler.o: src/remote_debug/ui_html.h
+endif
+
 OBJS += $(COREOBJS) $(DRVLIBS) $(OBJ)/unix.$(DISPLAY_METHOD)/osdepend.a
 
-MY_OBJDIRS = $(CORE_OBJDIRS) $(sort $(OBJDIRS))
+MY_OBJDIRS = $(CORE_OBJDIRS) $(sort $(OBJDIRS)) $(P2K_OBJDIRS)
 
 ##############################################################################
 # Begin of the real makefile.
 ##############################################################################
-$(NAME).$(DISPLAY_METHOD): $(OBJS) $(VGMOBJS) $(PROCOBJS) $(LISYOBJS)
+$(NAME).$(DISPLAY_METHOD): $(OBJS) $(VGMOBJS) $(PROCOBJS) $(LISYOBJS) $(P2KOBJS)
 	$(CC_COMMENT) @echo 'Linking $@ ...'
-	$(CC_COMPILE) $(LD) $(LDFLAGS) -o $@ $(OBJS) $(VGMOBJS) $(PROCOBJS) $(LISYOBJS) $(MY_LIBS)
+	$(CC_COMPILE) $(LD) $(LDFLAGS) -o $@ $(OBJS) $(VGMOBJS) $(PROCOBJS) $(LISYOBJS) $(P2KOBJS) $(MY_LIBS)
 
 tools: $(ZLIB) $(OBJDIRS) $(TOOLS)
 
 objdirs: $(MY_OBJDIRS)
 
 $(MY_OBJDIRS):
-	-mkdir $@
+	-mkdir -p $@
 
 xlistdev: src/unix/contrib/tools/xlistdev.c
 	$(CC_COMMENT) @echo 'Compiling $< ...'
@@ -496,7 +510,7 @@ copycab:
 	for j in $$i/*; do $(INSTALL_DATA) $$j $(XMAMEROOT)/$$i; done; done
 
 clean: 
-	rm -fr $(OBJ) $(NAME).* xlistdev src/unix/contrib/cutzlib-1.1.4/libz.a src/unix/contrib/cutzlib-1.1.4/*.o $(TOOLS)
+	rm -fr $(OBJ) $(NAME).* xlistdev src/unix/contrib/cutzlib-1.1.4/libz.a src/unix/contrib/cutzlib-1.1.4/*.o $(TOOLS) src/remote_debug/ui_html.h
 #	cd makedep; make clean
 
 clean68k:

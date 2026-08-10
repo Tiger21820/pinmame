@@ -23,6 +23,19 @@ DRVLIBS += $(PINOBJ)/sndbrd.o $(PINOBJ)/bulb.o
 DRVLIBS += $(OBJ)/machine/4094.o
 DRVLIBS += $(OBJ)/sound/wavwrite.o
 
+ifdef REMOTE_DEBUG
+DRVLIBS += $(OBJ)/remote_debug/remote_debug.o $(OBJ)/remote_debug/http_server.o $(OBJ)/remote_debug/api_handler.o
+
+# The remote debugger sources must compile without warnings; enforce this
+# for these objects only. Project include dirs are turned into system
+# include dirs so that legacy core headers do not trigger warnings here.
+REMOTE_DEBUG_CFLAGS = -std=gnu99 -Wall -Wextra -Wunused -pedantic
+
+$(OBJ)/remote_debug/%.o: src/remote_debug/%.c
+	$(CC_COMMENT) @echo 'Compiling $< (strict) ...'
+	$(CC_COMPILE) $(CC) $(patsubst -I%,-isystem%,$(MY_CFLAGS)) $(REMOTE_DEBUG_CFLAGS) -o $@ -c $<
+endif
+
 COREOBJS += $(PINOBJ)/driver.o $(OBJ)/cheat.o $(PINOBJ)/mech.o
 
 # taken from MESS
@@ -84,6 +97,11 @@ DRVLIBS += $(PINOBJ)/slalom.o
 DRVLIBS += $(PINOBJ)/boomerang.o
 DRVLIBS += $(PINOBJ)/spiritof76.o
 DRVLIBS += $(PINOBJ)/luckydraw.o
+# Pinball 2000 bring-up driver. src/wpc/p2k.c is itself wrapped in #if HAS_MEDIAGX, so without
+# the subsystem it compiles to an empty object - this only avoids building it at all.
+ifdef P2K
+DRVLIBS += $(PINOBJ)/p2k.o
+endif
 DRVLIBS += $(PINOBJ)/efo.o $(PINOBJ)/efosnd.o
 DRVLIBS += $(PINOBJ)/regama.o
 #
@@ -206,6 +224,11 @@ CPUS += TMS7000@
 CPUS += SCAMP@
 CPUS += ARM7@
 CPUS += AT91@
+# The MediaGX core lives in src/p2k/, so only register it when that is built - otherwise
+# cpuintrf's table references symbols nothing provides and a plain build fails to link.
+ifdef P2K
+CPUS += MEDIAGX@
+endif
 CPUS += CDP1802@
 CPUS += TMS9980@
 CPUS += TMS9995@

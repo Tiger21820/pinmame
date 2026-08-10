@@ -7,6 +7,8 @@
 PinMAME emulates the hardware found in almost every solid state pinball machine created from
 the earliest days of CPU-controlled machines (mid 1970's) through 2014 (Stern SAM),
 with around 770 emulated unique Pinball machines and many more clones/revisions (overall more than 2700 sets).
+In addition to official revisions, PinMAME also allows for homebrew modifications, similar in spirit to HBMAME
+(these are all marked as 'MOD' in the naming).
 It is available in various forms:
 
 Standalone Emulator (PinMAME (command line), PinMAME32 (UI))
@@ -21,7 +23,7 @@ Supported platforms: Windows (x86), Linux (x86/Arm, incl. RaspberryPi and RK3588
 Currently, the following pinball hardware is emulated:
 
 Williams/Bally WPC, Williams/Bally System 11, Williams System 9, Williams System 7,
-Williams System 6, Williams System 4, Williams System 3,
+Williams System 6, Williams System 4, Williams System 3, Pinball 2000,
 Data East AlphaNumeric System, Data East 128x16 DMD, Data East 128x32 DMD,
 Data East/Sega 192x64 DMD, Sega/Stern Whitestar System, Stern S.A.M., Stern MPU-100, Stern MPU-200,
 Bally MPU-17 & MPU-35, Bally Video/Pinball, Bally 6803,
@@ -43,6 +45,10 @@ info on using MAME related functions.
 All standard MAME "functions" do work the same way in PinMAME (profiler, debugger, cheats,
 record/playback, command line switches etc.).
 
+In addition to the built-in debugger, it also includes an **Advanced Remote Debugger** module, providing a thread-safe REST API and a high-fidelity web dashboard for headless or remote analysis.
+Features include real-time DMD/Alphanumeric rendering, hardware breakpoints, memory pattern search, and interactive matrix visualization. See the [README](src/remote_debug/README.md) for full documentation and API reference.
+For the moment, it's mostly useful for debugging WPC/6809-based machines, but is applicable to all machines.
+
 In addition, there is special compile time support for the [P-ROC](http://www.pinballcontrollers.com),
 to drive (at least) real WPC machines with PinMAME/P-ROC, [PPUC](https://github.com/PPUC) and LISY
 (Linux for Gottlieb System1 & System80, Bally, Atari, Williams and 'HOme' Pinballs, to drive real pinball machines via
@@ -60,6 +66,7 @@ and listen to/record the pinball game sounds with the pure PinMAME package itsel
 
 ## Games supported (incomplete)
 
+- *Midway Pinball 2000* - All games from Revenge From Mars (1999) to Star Wars Episode I (1999)
 - *Williams/Bally WPC* - All games from Dr. Dude (1990) to Cactus Canyon (1998)
 - *Williams/Bally System 11* - All games from High Speed (1986) to Dr.Dude (1990)
 - *Williams System 9* - All games from Space Shuttle (1984) to Comet (1985)
@@ -151,6 +158,39 @@ For many games there is a ball simulator which you can use to simulate "playing"
 Essentially, it triggers the correct switches depending on where the balls are located. You can program a simulator for your own favourite game if you know a bit of programming and a lot about the game. If you are intersted let us know and we'll try to explain how to do it.
 
 For more information, please refer to [simulation.txt](release/simulation.txt) for instructions on using the pinball simulator built into PinMAME! Many games are not fully simulated, but some have at least preliminary simulator support!
+
+## Remote Debugger & Headless Mode
+
+Extension designed for deep hardware reversing and headless operation (e.g., in Docker or CI environments), for the moment mostly targeted at WPC/6809-based machines,
+and running PinMAME for Linux, but in general applicable to all machines. For details see the [README](src/remote_debug/README.md).
+
+### Key Features
+- **Headless Execution**: Run PinMAME without X11/SDL windows using the `-headless` flag.
+- **REST API**: Control the emulator via a thread-safe HTTP interface.
+- **Web Dashboard**: Modern, low-latency UI for live DMD rendering, memory editing, and disassembling.
+- **WPC Specialization**: Real-time visualization of Lamp, Switch, and Solenoid matrices, including WPC ROM banking.
+- **Classic CLI**: Support for MAME-style debugger commands (`BP`, `WP`, `G`, `S`, etc.) via the web console.
+
+### Advanced Features
+- **Memory Search**: Hex pattern matching via the UI or `GET /api/debugger/memory/find`.
+- **Cabinet & Service Panel**: Interactive buttons for COIN, START, and Service functions (+, -, ESC, ENT) with real-time feedback.
+- **Immediate Execution Halt**: Breakpoints and watchpoints trigger an instant CPU abort for precise instruction-level debugging.
+- **WPC Matrix Visualizer**: Live 8x8 grids for Lamps and Switches, plus Solenoid tracking.
+
+### Building
+To build with the Remote Debugger extension:
+```bash
+make -f makefile.unix REMOTE_DEBUG=1
+```
+
+### Usage
+Start PinMAME in headless mode with the debugger active:
+```bash
+./xpinmamed.x11 -headless -startpaused -httpport 8935 taf_l7
+```
+- `-headless`: Disables video/input windows.
+- `-startpaused`: Halts the CPU at the first instruction.
+- `-httpport <port>`: Sets the API/UI port (default: 8935).
 
 # Note from the PinMAME Development team
 

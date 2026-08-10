@@ -33,6 +33,9 @@ enum
 #if defined(PINMAME) && (HAS_AT91)
 	CPU_AT91,
 #endif
+#if defined(PINMAME) && (HAS_MEDIAGX)
+	CPU_MEDIAGX,
+#endif
 #if defined(PINMAME) && (HAS_PPS4)
 	CPU_PPS4,
 #endif
@@ -274,6 +277,9 @@ enum
 #endif
 #if (HAS_ADSP2115)
 	CPU_ADSP2115,
+#endif
+#if (HAS_ADSP2104)
+	CPU_ADSP2104,
 #endif
 #if (HAS_PSXCPU)
 	CPU_PSXCPU,

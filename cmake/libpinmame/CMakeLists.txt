@@ -127,6 +127,7 @@ add_compile_definitions(
    HAS_M6802=1
    HAS_ADSP2101=1
    HAS_ADSP2105=1
+   HAS_ADSP2104=1
    HAS_Z80=1
    HAS_M6502=1
    HAS_M65C02=1
@@ -746,6 +747,7 @@ set(PINMAME_INCLUDE_DIRS
    src/unix/sysdep
 )
 
+
 if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw")
    list(APPEND PINMAME_INCLUDE_DIRS
       src/vc
@@ -839,4 +841,16 @@ if(TARGET pinmame_shared)
 endif()
 if(TARGET pinmame_static)
    pinmame_enable_asmjit(pinmame_static)
+endif()
+
+# --- Pinball 2000 subsystem (src/p2k)
+# On by default; -DPINMAME_P2K=OFF leaves neither the driver nor the MediaGX CPU registered
+# and a plain libpinmame unchanged. Everything the subsystem needs is in cmake/p2k.cmake,
+# shared with the Windows builds
+include(${CMAKE_SOURCE_DIR}/cmake/p2k.cmake)
+if(TARGET pinmame_shared)
+   pinmame_enable_p2k(pinmame_shared)
+endif()
+if(TARGET pinmame_static)
+   pinmame_enable_p2k(pinmame_static)
 endif()

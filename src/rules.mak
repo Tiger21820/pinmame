@@ -840,11 +840,13 @@ CPU=$(strip $(findstring ADSP2105@,$(CPUS)))
 ifneq ($(CPU),)
 OBJDIRS += $(OBJ)/cpu/adsp2100
 CPUDEFS += -DHAS_ADSP2105=1
+CPUDEFS += -DHAS_ADSP2104=1
 CPUOBJS += $(OBJ)/cpu/adsp2100/adsp2100.o
 DBGOBJS += $(OBJ)/cpu/adsp2100/2100dasm.o
 $(OBJ)/cpu/adsp2100/adsp2100.o: src/cpu/adsp2100/adsp2100.c src/cpu/adsp2100/adsp2100.h src/cpu/adsp2100/2100ops.c
 else
 CPUDEFS += -DHAS_ADSP2105=0
+CPUDEFS += -DHAS_ADSP2104=0
 endif
 
 CPU=$(strip $(findstring ADSP2115@,$(CPUS)))
@@ -1673,6 +1675,13 @@ DBGOBJS += $(OBJ)/cpu/at91/at91dasm.o
 $(OBJ)/cpu/at91/at91.o: src/cpu/at91/at91.c src/cpu/at91/at91.h
 else
 CPUDEFS += -DHAS_AT91=0
+endif
+
+CPU=$(strip $(findstring MEDIAGX@,$(CPUS)))
+ifneq ($(CPU),)
+CPUDEFS += -DHAS_MEDIAGX=1
+else
+CPUDEFS += -DHAS_MEDIAGX=0
 endif
 
 CPU=$(strip $(findstring CDP1802@,$(CPUS)))

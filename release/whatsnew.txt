@@ -9,6 +9,8 @@ Version 3.7 (XX XXth, 2026) - ""
 Users now can set the 'serial_device' setting (registry key) to a COM port,
 to attach to the WPC/WPC95 serial printer interface
 
+Add a HTTP remote debugger (see 'src/remote_debug/README.md' for all details), mostly targeted at WPC/6809-based machines and Linux PinMAME (for now), but in general applicable to all machines.
+
 Workaround a crash / race-condition when reading PinMAME state, e.g. when exiting VPX
 
 Cleanup PinMAME32 UI a bit (historic/leftover MAME options like vector display, trackball or lightgun)
@@ -20,12 +22,15 @@ Fixed debugger lockup when tabbing backwards
 Fixed broken fast frames UI/registry option (VPinMAME, to enable faster boot/startup) and nothrottle (PinMAME(32), e.g. for benchmarking)
  also added the "fastframes" command line option to PinMAME(32)
 
+Fixed in libPinMAME: Handle aliases properly
+
 VS2026 build support
 
 Get rid of BasicBitmap external dependency
 Get rid of BASS external dependency (used for internal AltSound mode 1 support) and replace by miniaudio
 
 *** CORE/CPU ***
+Added Pinball 2000 emulation. It works in principle, but the CPU is clocked way too low for performance reasons (for now)! Still, it seems to work reasonably well.
 Fixed a potential small problem with Bally VideoPins sound emulation
 Added physical/PWM DMD support to Capcom games (potentially leading to more brightness levels being displayed if the CPU triggers it)
 Added physical/PWM (dimmed) segment support to System 11 games
@@ -61,6 +66,8 @@ Replaced existing arm7/AT91 JIT compiler with a new asmjit-library based one, wh
 *** ROM SUPPORT *** Thanks to Tom Collins/Scorbit, Paul Swan, Dieter Werner, Victor Fernandez, Jordi Beltran, ipdb.org, Billc479, Scott Charles, inkochnito, frisbez, Chad Hendrickson, idealjoker, ingo333, RedBall, Quench, slochar, Jesus Carballo, Rockman i uri666arcade de l'associació ARCADE (Recreativas.org)
 New:
 IDSA: Fantastic Car
+WMS:  Revenge From Mars 1.80, 1.60, 1.50, 1.40, 1.20
+      Star Wars Episode I 1.50, 1.40, 1.30
 
 Kinda new:
 Baywatch 4.02 (unofficial MOD)
@@ -73,7 +80,7 @@ Gottlieb: renamed Monte Carlo (German) to German rev.1
           renamed Monte Carlo (German Millions option, Free Play) to German rev.1 Millions option, Free Play
 
 Clones:
-Addams Family, The (L-5 Prototype D-7 LED Ghost Fix + Ballsaver MOD)
+Addams Family, The (L-5 Prototype D-7 LED Ghost Fix + Ballsaver MOD), (H-4/I-4 LED Ghost Fix + Ballsaver MOD)
 Addams Family Special Collectors Edition / Gold, The (H-3/I-3 LED Ghost Fix + Ballsaver MOD)
 Adventures of Rocky and Bullwinkle and Friends 1.03 (Italian), 1.10 (Belgian) (note that both dumps are incomplete, the italian set may be correct though, but the belgian one misses the display, so does not feature belgian text)
 Al's Garage Band Goes On A World Tour R09a (maybe newest version that exists? at least the newest one for the prototype/version-A/double-lock variants of the game)

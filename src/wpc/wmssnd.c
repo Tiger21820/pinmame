@@ -1216,6 +1216,41 @@ static WRITE16_HANDLER(dcs2_RAMbank_w);
 /*static*/ WRITE16_HANDLER(dcs_latch_w);
 /* ADSP patch need to know if we are using dcs95 soundboard */
 int WPC_gWPC95;
+/* Enables the hand-written WPC decoder speedups in the ADSP core.  Off for
+   board variants those transcriptions were not written for (i.e. Pinball 2000). */
+int DCS_useSpeedup = 1;
+/* Enables the WPC or Pin2K ADSP core's idle-loop detector, which suspends the DSP while it
+   spins on the autobuffer index and lets the next interrupt wake it.  Separate
+   from the decoder above because it is safe where that is not: it reads no
+   memory and replaces no code, so nothing about it depends on the board's
+   memory map.  Pinball 2000 spends 66.9% of its DSP opcodes in that spin */
+int DCS_useIdleSkip = 1;
+
+/*-- Pinball 2000 (DCS2, ADSP-2104 + SDRC) --*/
+static READ16_HANDLER(sdrc_r);
+static WRITE16_HANDLER(sdrc_w);
+static void sdrc_reset(void);
+static void sdrc_update_bank_pointers(void);
+static READ16_HANDLER(p2k_data_r);
+static WRITE16_HANDLER(p2k_data_w);
+#if P2K_DEBUG
+static void p2k_dumpPgm2(UINT16 data, const char *trigger);
+#endif
+static READ16_HANDLER(p2k_data_hi_r);
+static WRITE16_HANDLER(p2k_data_hi_w);
+static READ16_HANDLER(p2k_status_r);
+static READ16_HANDLER(p2k_input_latch_r);
+static WRITE16_HANDLER(p2k_input_latch_ack_w);
+static READ16_HANDLER(p2k_output_latch_r);
+static WRITE16_HANDLER(p2k_output_latch_w);
+static READ16_HANDLER(p2k_latch_status_r);
+static READ16_HANDLER(p2k_output_control_r);
+static WRITE16_HANDLER(p2k_output_control_w);
+static READ16_HANDLER(p2k_fifo_r);
+static READ16_HANDLER(adsp_control_r);
+static int p2k_preprocess_write(UINT16 data);
+static int p2k_custStart(const struct MachineSound *msound);
+static void dcs_dacUpdateStereo(int num, INT16 **buffer, int length);
 
 /*-- sound generation --*/
 static int dcs_custStart(const struct MachineSound *msound);
@@ -1235,10 +1270,29 @@ static void dcs_init(struct sndbrdData *brdData);
 #define DCS_BUFFER_MASK (DCS_BUFFER_SIZE - 1)
 #define DCS_DEFAULT_SAMPLE_RATE 31250 // as found in Ask Uncle Willy #3: July 7, 1995
 
+/* sndbrd subType for the Pinball 2000 board (SNDBRD_DCSP2K) */
+#define DCS_SUBTYPE_P2K 3
+
+/* host command queue depth (power of 2) */
+#define P2K_CMD_QUEUE_SIZE 256
+#define P2K_CMD_QUEUE_MASK (P2K_CMD_QUEUE_SIZE - 1)
+/* a boot block is 8*(header+1) words; the header is a byte, so 2048 is the
+   worst case.  The 2104 can only hold 512, but buffer the full range so an
+   oversized block is detected rather than smashing the stack. */
+#define P2K_XFER_MAX_WORDS 2048
+
 static struct {
- int     status;    // 0 = disabled, 1 playing
- int     sOut, sIn; // positions in sound buffer
- INT16  *buffer;
+ int     status;      // 0 = disabled, 1 playing
+ int     sOut, sIn;   // positions in sound buffer
+ INT16* __restrict buffer;
+ INT16* __restrict buffer2; // right channel, allocated for stereo boards (Pin2K) only
+ int     stereo;      // 0 = mono (WPC DCS/DCS95), 1 = two interleaved channels
+ UINT16  pendingFirst; // first word of a half-assembled stereo frame, carried
+ int     havePending;  // across txData calls; it feeds the right speaker
+#ifdef PIN2K_SOUND_TEST
+ UINT32  pcmFrames, pcmNonZero; // is what we are transmitting actually audio?
+ INT32   pcmPeak;
+#endif
  int     stream;
 #ifdef DCS_LOWPASS
  #define SALLEN_KEY // like real HW/sound board uses, 4x 3rd order Sallen-Key low pass filters
@@ -1260,9 +1314,58 @@ static struct {
   UINT8  *ROMbankPtr;
   UINT16 *RAMbankPtr;
   int     replyAvail;
+  /*-- Pinball 2000 only --*/
+  struct {
+    UINT16  reg[4];       /* SDRC ASIC registers */
+    UINT8   seed;         /* SDRC security seed */
+    UINT16 *sram;         /* 32K words of board SRAM */
+    UINT16 *sounddata;    /* sound data (flash), words */
+    UINT32  sounddataWords;
+    UINT16 *bootrom;      /* boot/program ROM, words */
+    UINT32  bootromWords;
+    UINT16 *romPagePtr;   /* current SDRC ROM page */
+    UINT16 *dramPagePtr;  /* current SDRC DRAM page */
+    UINT16  inputData;    /* host -> DSP */
+    UINT16  outputData;   /* DSP -> host */
+    UINT16  outputControl;/* 0x0402, three extra lines to the host */
+    int     inputFull;
+    int     outputFull;
+    UINT16  lastLatchStatus; /* latch-poll skip, see p2k_latch_status_r */
+    int     latchPolls;
+    int     state;        /* 3-state handshake seen at DSP data 0x0413 */
+    UINT16  flagLatch;    /* host stash, OR'd into the host status register */
+    UINT8   echo;         /* host liveness probe byte */
+    /*-- host command queue; the DSP acks one at a time --*/
+    UINT16  cmdQueue[P2K_CMD_QUEUE_SIZE];
+    int     cmdIn, cmdOut;
+    /*-- HLE of the DSP-side boot-block receive loop (host command 0x000e) --*/
+    int     xferState;    /* 0 = idle, 1 = receiving payload, 2 = awaiting repeat */
+    UINT16  xferCmd;      /* the command word that opened the transfer */
+    int     xferWordsLeft;
+    int     xferByteCount;
+    UINT32  xferTemp;
+    UINT32  xferData[P2K_XFER_MAX_WORDS];
+  } p2k;
 } dcslocals;
 
+/*-- these macros mirror the SDRC ASIC register layout documented in MAME's
+    dcs.cpp; the bit positions are hardware, not a MAME invention --*/
+#define SDRC_ROM_ST   ((dcslocals.p2k.reg[0] >> 0) & 3)   /* 0=0000, 1=3000, 2=3400, 3=none */
+#define SDRC_ROM_SZ   ((dcslocals.p2k.reg[0] >> 4) & 1)   /* 0=4k, 1=1k */
+#define SDRC_ROM_MS   ((dcslocals.p2k.reg[0] >> 5) & 1)   /* 0=/BMS, 1=/DMS */
+#define SDRC_ROM_PG   ((dcslocals.p2k.reg[0] >> 7) & 7)
+#define SDRC_SM_EN    ((dcslocals.p2k.reg[0] >> 11) & 1)
+#define SDRC_SM_BK    ((dcslocals.p2k.reg[0] >> 12) & 1)
+#define SDRC_SMODE    ((dcslocals.p2k.reg[0] >> 13) & 7)
+
+#define SDRC_DM_ST    ((dcslocals.p2k.reg[1] >> 0) & 3)   /* 0=none, 1=0000, 2=3000, 3=3400 */
+#define SDRC_MUTE     ((dcslocals.p2k.reg[1] >> 14) & 1)
+
+#define SDRC_DM_PG    ((dcslocals.p2k.reg[2] >> 0) & 0x7ff)
+#define SDRC_EPM_PG   ((dcslocals.p2k.reg[2] >> 0) & 0x1fff)
+
 static struct CustomSound_interface dcs_custInt = { dcs_custStart, dcs_custStop, 0 };
+static struct CustomSound_interface dcs_p2k_custInt = { p2k_custStart, dcs_custStop, 0 };
 
 static MEMORY_READ16_START(dcs1_readmem)
   { ADSP_DATA_ADDR_RANGE(0x0000, 0x1fff), MRA16_RAM },
@@ -1331,6 +1434,68 @@ MACHINE_DRIVER_START(wmssnd_dcs2)
 #endif
 MACHINE_DRIVER_END
 
+/*--------------------------------------------------------------------------
+/  Pinball 2000 DCS2 sound board (ADSP-2104 @ 16MHz + SDRC ASIC, stereo)
+/
+/  Data space layout (see docs/pin2k_sound.md):
+/    0400       host input latch (read) / input latch ack (write)
+/    0401       host output latch
+/    0402       output control
+/    0403       latch status
+/    0404-0407  input FIFO
+/    0413       Pin2K host handshake status
+/    0480-0483  SDRC ASIC
+/    0000-37ff  SRAM / SDRC ROM page / SDRC DRAM page (decoded at runtime)
+/    3800-3fff  internal RAM
+/    3fe0-3fff  ADSP control registers
+/
+/  Everything below 0x3800 has to go through handlers rather than direct RAM
+/  entries, because the SDRC remaps those windows at runtime and PinMAME's
+/  memory tables are static.  This costs some speed versus the WPC variants,
+/  which may be acceptable here: unlike the 1994-era WPC boards this one may not
+/  need the decode-loop speedup anymore to keep up with real time.
+/-------------------------------------------------------------------------*/
+static MEMORY_READ16_START(dcs3_readmem)
+  { ADSP_DATA_ADDR_RANGE(0x0000, 0x03ff), p2k_data_r },
+  { ADSP_DATA_ADDR_RANGE(0x0400, 0x0400), p2k_input_latch_r },
+  { ADSP_DATA_ADDR_RANGE(0x0401, 0x0401), p2k_output_latch_r },
+  { ADSP_DATA_ADDR_RANGE(0x0402, 0x0402), p2k_output_control_r },
+  { ADSP_DATA_ADDR_RANGE(0x0403, 0x0403), p2k_latch_status_r },
+  { ADSP_DATA_ADDR_RANGE(0x0404, 0x0407), p2k_fifo_r },
+  { ADSP_DATA_ADDR_RANGE(0x0413, 0x0413), p2k_status_r },
+  { ADSP_DATA_ADDR_RANGE(0x0480, 0x0483), sdrc_r },
+  { ADSP_DATA_ADDR_RANGE(0x0800, 0x37ff), p2k_data_hi_r },
+  { ADSP_DATA_ADDR_RANGE(0x3800, 0x3fdf), MRA16_RAM },
+  { ADSP_DATA_ADDR_RANGE(0x3fe0, 0x3fff), adsp_control_r },
+  { ADSP_PGM_ADDR_RANGE (0x0000, 0x01ff), MRA16_RAM }, /* 2104 internal boot RAM (512 words) */
+  { ADSP_PGM_ADDR_RANGE (0x0800, 0x3fff), MRA16_RAM }, /* SRAM as program memory */
+MEMORY_END
+
+static MEMORY_WRITE16_START(dcs3_writemem)
+  { ADSP_DATA_ADDR_RANGE(0x0000, 0x03ff), p2k_data_w },
+  { ADSP_DATA_ADDR_RANGE(0x0400, 0x0400), p2k_input_latch_ack_w },
+  { ADSP_DATA_ADDR_RANGE(0x0401, 0x0401), p2k_output_latch_w },
+  { ADSP_DATA_ADDR_RANGE(0x0402, 0x0402), p2k_output_control_w },
+  { ADSP_DATA_ADDR_RANGE(0x0480, 0x0483), sdrc_w },
+  { ADSP_DATA_ADDR_RANGE(0x0800, 0x37ff), p2k_data_hi_w },
+  { ADSP_DATA_ADDR_RANGE(0x3800, 0x3fdf), MWA16_RAM },
+  { ADSP_DATA_ADDR_RANGE(0x3fe0, 0x3fff), adsp_control_w },
+  { ADSP_PGM_ADDR_RANGE (0x0000, 0x01ff), MWA16_RAM },
+  { ADSP_PGM_ADDR_RANGE (0x0800, 0x3fff), MWA16_RAM },
+MEMORY_END
+
+MACHINE_DRIVER_START(wmssnd_dcs3)
+  MDRV_CPU_ADD(ADSP2104, 16000000)
+  MDRV_CPU_FLAGS(CPU_AUDIO_CPU)
+  MDRV_CPU_MEMORY(dcs3_readmem, dcs3_writemem)
+  MDRV_INTERLEAVE(50)
+  MDRV_SOUND_ADD(CUSTOM, dcs_p2k_custInt)
+  MDRV_SOUND_ATTRIBUTES(SOUND_SUPPORTS_STEREO)
+#ifdef ENABLE_MECHANICAL_SAMPLES
+  MDRV_SOUND_ADD(SAMPLES, samples_interface)
+#endif
+MACHINE_DRIVER_END
+
 /*----------------
 / Sound interface
 /-----------------*/
@@ -1367,6 +1532,466 @@ static READ16_HANDLER (dcs2_RAMbankSelect_r) {
   return dcslocals.RAMbank;
 }
 
+/*--------------------------------------------------------------------------
+/  SDRC (Sound DRAM Control) ASIC  --  Pinball 2000 only
+/
+/  Ported from the register model in MAME's dcs.cpp.  MAME installs/removes
+/  address-map entries as the SDRC is reprogrammed; PinMAME's memory tables
+/  are fixed at build time, so instead we keep the derived page pointers here
+/  and let p2k_data_r/w do the window decode on each access.
+/-------------------------------------------------------------------------*/
+static void sdrc_update_bank_pointers(void) {
+  /* MAME guards this whole body with SDRC_SM_EN, which is the *SRAM* enable
+     and has nothing to do with ROM/DRAM paging -- it gets away with it
+     because sdrc_remap_memory() installs the windows separately.  We decode
+     windows live, so the guard would only ever leave these pointers stale.
+     SM_EN still gates SRAM, in p2k_decode(). */
+  const int pagesize = (SDRC_ROM_SZ == 0 && SDRC_ROM_ST != 0) ? 4096 : 1024;
+
+  if (dcslocals.p2k.bootrom == dcslocals.p2k.sounddata) {
+    /* ROM-based: the memory page selects from ROM */
+    if (SDRC_ROM_MS == 1 && SDRC_ROM_ST != 3)
+      dcslocals.p2k.romPagePtr = dcslocals.p2k.sounddata +
+        ((SDRC_EPM_PG * pagesize) % dcslocals.p2k.sounddataWords);
+  }
+  else {
+    /* RAM-based: ROM page selects from ROM, memory page selects from RAM */
+    if (SDRC_ROM_MS == 1 && SDRC_ROM_ST != 3)
+      dcslocals.p2k.romPagePtr = dcslocals.p2k.bootrom +
+        ((SDRC_ROM_PG * 4096) % dcslocals.p2k.bootromWords);
+  }
+  /* the DRAM page is independent of how the ROM is sourced */
+  if (SDRC_DM_ST != 0)
+    dcslocals.p2k.dramPagePtr = dcslocals.p2k.sounddata +
+      ((SDRC_DM_PG * 1024) % dcslocals.p2k.sounddataWords);
+}
+
+static void sdrc_reset(void) {
+  memset(dcslocals.p2k.reg, 0, sizeof(dcslocals.p2k.reg));
+  dcslocals.p2k.seed = 0;
+  dcslocals.p2k.romPagePtr  = dcslocals.p2k.bootrom;
+  dcslocals.p2k.dramPagePtr = dcslocals.p2k.sounddata;
+  sdrc_update_bank_pointers();
+}
+
+static READ16_HANDLER(sdrc_r) {
+  UINT16 result = dcslocals.p2k.reg[offset & 3];
+  /* offset 3 is the security handshake */
+  if ((offset & 3) == 3) {
+    switch (SDRC_SMODE) {
+      default:
+      case 0: result = 0x5a81; break;                                      /* no-op      */
+      case 1: result = 0x5aa4; break;                                      /* write seed */
+      case 2: result = 0x5a00 | ((dcslocals.p2k.seed & 0x3f) << 1); break; /* read data  */
+      case 3: result = 0x5ab9; break;                                      /* shift left */
+      case 4: result = 0x5a03; break;                                      /* add        */
+      case 5: result = 0x5a69; break;                                      /* xor        */
+      case 6: result = 0x5a20; break;                                      /* prg        */
+      case 7: result = 0x5aff; break;                                      /* invert     */
+    }
+  }
+  return result;
+}
+
+static WRITE16_HANDLER(sdrc_w) {
+  const int reg = offset & 3;
+  const UINT16 diff = dcslocals.p2k.reg[reg] ^ data;
+#ifdef PIN2K_SOUND_TEST
+  /* Skip the LED bit, which the idle loop toggles constantly, and cap the
+     total: once running, the firmware polls a flash page forever and the
+     resulting spam buries everything else in the log. The interesting part
+     is the boot-time page walk, which is well inside the cap. */
+  if (diff & ~0x2000u) {
+    static unsigned logged = 0;
+    if (logged < 300)
+      printf("P2K sdrc[%d] <- %04x\n", reg, data);
+    else if (logged == 300)
+      printf("P2K: further SDRC writes suppressed (idle polling)\n");
+    logged++;
+  }
+#endif
+
+  switch (reg) {
+    /* MAME reinstalls address-map entries here (sdrc_remap_memory) and only
+       re-derives the page pointers on a subset of the bits.  We decode the
+       windows live in p2k_decode() instead, so the *only* thing that has to
+       happen on a write is refreshing the cached page pointers -- but then it
+       has to happen for every bit MAME would have remapped on, not just the
+       page-register bits, or the pointer goes stale against a changed page
+       size or source. */
+    case 0: /* ROM mapping */
+      dcslocals.p2k.reg[0] = data;
+      if (diff & (0x1833 | 0x0380)) sdrc_update_bank_pointers();
+      break;
+    case 1: /* RAM mapping */
+      dcslocals.p2k.reg[1] = data;
+      if (diff & 0x0003) sdrc_update_bank_pointers();
+      break;
+    case 2: /* paging */
+      dcslocals.p2k.reg[2] = data;
+      if (diff & 0x1fff) sdrc_update_bank_pointers();
+      break;
+    case 3: /* security */
+      switch (SDRC_SMODE) {
+        case 0: /* no-op    */
+        case 2: /* read data*/
+          break;
+        case 1: dcslocals.p2k.seed = data & 0xff; break;
+        case 3: dcslocals.p2k.seed = (dcslocals.p2k.seed << 1) | 1; break;
+        case 4: dcslocals.p2k.seed += dcslocals.p2k.seed >> 1; break;
+        case 5: dcslocals.p2k.seed ^= (dcslocals.p2k.seed << 1) | 1; break;
+        case 6: dcslocals.p2k.seed = (((dcslocals.p2k.seed << 7) ^ (dcslocals.p2k.seed << 5) ^
+                                       (dcslocals.p2k.seed << 4) ^ (dcslocals.p2k.seed << 3)) & 0x80) |
+                                     (dcslocals.p2k.seed >> 1); break;
+        case 7: dcslocals.p2k.seed = ~dcslocals.p2k.seed; break;
+      }
+      break;
+  }
+}
+
+/* The Pin2K sound board's tracing and its program-memory dump exist to work out the protocol,
+   and are behind the subsystem's one debug switch - see src/p2k/p2k_debug.h, which documents it.
+   Without it neither the P2K_* variables nor the code reading them is compiled */
+#ifndef P2K_DEBUG
+#define P2K_DEBUG 0
+#endif
+
+#if !P2K_DEBUG
+#define P2KTRACE(x)          ((void)0)
+#define p2k_dumpPgm2(d, t)   ((void)0)
+#else
+/* Latch tracing for protocol work (P2K_DSPLOG=1), off unless asked for. */
+static int p2k_traceOn(void) {
+  static int on = -1;
+  if (on < 0) { const char *e = getenv("P2K_DSPLOG"); on = (e && *e != '0') ? 1 : 0; }
+  return on;
+}
+#define P2KTRACE(x) do { if (p2k_traceOn()) { printf x; fflush(stdout); } } while (0)
+#endif
+
+/*-- decode a Pin2K data-space address through the current SDRC state --*/
+/*-- returns NULL for an unmapped address --*/
+static UINT16 *p2k_decode(offs_t offset) {
+  /* SDRC DRAM page window.
+     Checked before the ROM window on purpose: MAME installs SRAM, then the
+     ROM page, then the DRAM page, and a later install wins -- so where the
+     two overlap (e.g. ROM_ST==1 and DM_ST==2, both based at 0x3000) the DRAM
+     page is what the DSP sees. */
+  if (SDRC_DM_ST != 0) {
+    const int base = (SDRC_DM_ST == 1) ? 0x0000 : (SDRC_DM_ST == 2) ? 0x3000 : 0x3400;
+    if (offset >= (offs_t)base && offset < (offs_t)(base + 0x400) && dcslocals.p2k.dramPagePtr)
+      return dcslocals.p2k.dramPagePtr + (offset - base);
+  }
+  /* SDRC ROM page window */
+  if (SDRC_ROM_MS == 1 && SDRC_ROM_ST != 3) {
+    const int base = (SDRC_ROM_ST == 0) ? 0x0000 : (SDRC_ROM_ST == 1) ? 0x3000 : 0x3400;
+    const int size = (SDRC_ROM_SZ == 0 && SDRC_ROM_ST != 0) ? 4096 : 1024;
+    if (offset >= (offs_t)base && offset < (offs_t)(base + size) && dcslocals.p2k.romPagePtr)
+      return dcslocals.p2k.romPagePtr + (offset - base);
+  }
+  /* banked SRAM */
+  if (SDRC_SM_EN && offset >= 0x0800 && offset <= 0x37ff) {
+    if (SDRC_SM_BK == 0) {
+      /* map 0: contiguous SRAM from 0800-37ff */
+      if (offset <= 0x17ff) return dcslocals.p2k.sram + 0x0000 + (offset - 0x0800);
+      if (offset <= 0x27ff) return dcslocals.p2k.sram + 0x1000 + (offset - 0x1800);
+      return dcslocals.p2k.sram + 0x2000 + (offset - 0x2800);
+    }
+    else {
+      /* map 1: 0800-17ff unmapped, alternate RAM at 1800-27ff */
+      if (offset <= 0x17ff) return NULL;
+      if (offset <= 0x27ff) return dcslocals.p2k.sram + 0x3000 + (offset - 0x1800);
+      return dcslocals.p2k.sram + 0x2000 + (offset - 0x2800);
+    }
+  }
+  return NULL;
+}
+
+/*-- is this address inside the (read-only) SDRC ROM page window?      --*/
+/*-- an overlapping DRAM page wins and stays writable, matching MAME's --*/
+/*-- install order, so check that first                                --*/
+static int p2k_inRomWindow(offs_t offset) {
+  if (SDRC_DM_ST != 0) {
+    const int base = (SDRC_DM_ST == 1) ? 0x0000 : (SDRC_DM_ST == 2) ? 0x3000 : 0x3400;
+    if (offset >= (offs_t)base && offset < (offs_t)(base + 0x400))
+      return 0;
+  }
+  if (SDRC_ROM_MS == 1 && SDRC_ROM_ST != 3) {
+    const int base = (SDRC_ROM_ST == 0) ? 0x0000 : (SDRC_ROM_ST == 1) ? 0x3000 : 0x3400;
+    const int size = (SDRC_ROM_SZ == 0 && SDRC_ROM_ST != 0) ? 4096 : 1024;
+    return offset >= (offs_t)base && offset < (offs_t)(base + size);
+  }
+  return 0;
+}
+
+static READ16_HANDLER(p2k_data_r) {
+  const UINT16 * const p = p2k_decode(offset);
+  return p ? *p : 0;
+}
+
+static WRITE16_HANDLER(p2k_data_w) {
+  UINT16 *p;
+  if (p2k_inRomWindow(offset)) return; /* ROM page is read-only */
+  p = p2k_decode(offset);
+  if (p) *p = data;
+}
+
+/* A memory handler is called with an offset relative to the start of its own
+   map entry, so the second data window (0800-37ff) arrives based at zero.
+   p2k_decode() works in DSP word addresses, so rebase before decoding.  Left
+   unrebased, everything the DSP puts in banked SRAM lands 0x800 words away
+   from where it looks for it, and the board fails the host's memory test. */
+static READ16_HANDLER(p2k_data_hi_r)  { return p2k_data_r(offset + 0x0800, mem_mask); }
+static WRITE16_HANDLER(p2k_data_hi_w) { p2k_data_w(offset + 0x0800, data, mem_mask); }
+
+/*--------------------------------------------------------------------------
+/  Pin2K host handshake
+/
+/  The DSP sees the usual DCS input/output latches, plus a Pin2K-specific
+/  status port at 0x0413.  The host side is driven through the ordinary
+/  sndbrd entry points (dcs_data_w / dcs_data_r / dcs_ctrl_r), so a future
+/  Pin2K driver does not need to know any of this.
+/-------------------------------------------------------------------------*/
+static void p2k_enqueue(UINT16 data) {
+  const int next = (dcslocals.p2k.cmdIn + 1) & P2K_CMD_QUEUE_MASK;
+  if (next == dcslocals.p2k.cmdOut)
+    { DBGLOG(("P2K: host command queue overflow, dropping %04x\n", data)); return; }
+  dcslocals.p2k.cmdQueue[dcslocals.p2k.cmdIn] = data;
+  dcslocals.p2k.cmdIn = next;
+}
+
+/*-- hand the next queued host command to the DSP, if it is ready for one --*/
+static void p2k_pumpQueue(void) {
+  if (dcslocals.p2k.inputFull) return;
+  if (dcslocals.p2k.cmdOut == dcslocals.p2k.cmdIn) return;
+  dcslocals.p2k.inputData = dcslocals.p2k.cmdQueue[dcslocals.p2k.cmdOut];
+  dcslocals.p2k.cmdOut = (dcslocals.p2k.cmdOut + 1) & P2K_CMD_QUEUE_MASK;
+  dcslocals.p2k.inputFull = TRUE;
+  cpu_set_irq_line(dcslocals.brdData.cpuNo, ADSP2104_IRQ2, ASSERT_LINE);
+}
+
+/* Reading the latch is NOT an acknowledge -- MAME sets m_auto_ack = false for
+   every DCS2 device, so IRQ2 and the input-full flag survive the read and are
+   only cleared by an explicit write to this address.  Firmware that peeks the
+   latch before acking depends on this. */
+static READ16_HANDLER(p2k_input_latch_r) {
+  P2KTRACE(("P2K dsp  read  cmd  %04x  @pc %04x\n", dcslocals.p2k.inputData, activecpu_get_pc()));
+  return dcslocals.p2k.inputData;
+}
+
+static WRITE16_HANDLER(p2k_input_latch_ack_w) {
+  P2KTRACE(("P2K dsp  ack        %04x  @pc %04x\n", dcslocals.p2k.inputData, activecpu_get_pc()));
+  cpu_set_irq_line(dcslocals.brdData.cpuNo, ADSP2104_IRQ2, CLEAR_LINE);
+  dcslocals.p2k.inputFull = FALSE;
+  p2k_pumpQueue(); /* re-asserts IRQ2 if more commands are pending */
+}
+
+/* the input FIFO is not implemented; the reference reads back all-ones */
+static READ16_HANDLER(p2k_fifo_r) { return 0xffff; }
+
+static READ16_HANDLER(p2k_output_latch_r) {
+  return dcslocals.p2k.outputData;
+}
+
+#if P2K_DEBUG
+/* One-shot dump of the DSP's program memory, for offline disassembly, plus the
+   scratch words the board's self-tests leave their diagnosis in.  Written the
+   first time the DSP answers the host with P2K_DSPDUMPON (default: any reply);
+   16K 24-bit words, one little-endian UINT32 each. */
+static void p2k_dumpPgm2(UINT16 data, const char *trigger) {
+  static int done = 0;
+  const char * const want = getenv(trigger);
+  const char * const path = getenv("P2K_DSPDUMP");
+  const UINT16 *dm;
+  FILE *f;
+  int a;
+
+  if (done || !path) return;
+  if (want && data != (UINT16)strtol(want, NULL, 16)) return;
+  /* with no trigger configured the first reply takes the dump -- unless a host
+     command trigger is configured instead, which then owns it */
+  if (!want && (strcmp(trigger, "P2K_DSPDUMPON") != 0 || getenv("P2K_DSPDUMPCMD"))) return;
+  done = 1;
+  f = fopen(path, "wb");
+  if (!f) return;
+  fwrite(dcslocals.cpuRegion + ADSP2100_PGM_OFFSET, 4, 0x4000, f);
+  fclose(f);
+  /* data space next to it, as 16K little-endian words, named <file>.dm */
+  { char dmpath[512];
+    snprintf(dmpath, sizeof dmpath, "%s.dm", path);
+    f = fopen(dmpath, "wb");
+    if (f) { fwrite(dcslocals.cpuRegion + ADSP2100_DATA_OFFSET, 2, 0x4000, f); fclose(f); }
+  }
+  dm = (const UINT16 *)(dcslocals.cpuRegion + ADSP2100_DATA_OFFSET);
+  printf("P2K: program memory dumped to %s -- scratch", path);
+  for (a = 0x38e0; a <= 0x38ec; a++) printf(" [%04x]=%04x", a, dm[a]);
+  printf("\n"); fflush(stdout);
+}
+#endif /* P2K_DEBUG */
+
+static WRITE16_HANDLER(p2k_output_latch_w) {
+  p2k_dumpPgm2(data, "P2K_DSPDUMPON");
+  P2KTRACE(("P2K dsp  write reply %04x  @pc %04x\n", data, activecpu_get_pc()));
+  dcslocals.p2k.outputData = data;
+  dcslocals.p2k.outputFull = TRUE;
+  dcslocals.p2k.state = 1;
+  dcslocals.replyAvail = TRUE;
+  sndbrd_data_cb(dcslocals.brdData.boardNo, data);
+}
+
+/*-- Host latch status, and the DSP's host-side idle loop --------------------
+/
+/  Bit 7 says a host command is waiting, bit 6 says the host has taken the last
+/  reply, and the firmware busy-waits on both: a thirteen-instruction loop at
+/  program address 0x3d9c polls bit 7 and is 56.8% of every opcode this DSP
+/  executes once the autobuffer idle skip is in; a second at 0x3dbe polls bit 6.
+/  The core's idle detector catches neither - it keys on "AR = I7", which they
+/  do not contain, and its window is ten instructions against thirteen - but
+/  they poll a register we own, so noticing here is cheaper than watching
+/  opcodes: if the answer has not changed for a while the DSP is waiting, and
+/  nothing it can do by itself will change it.
+/
+/  SUSPENDING IS ONLY SAFE IF EVERY WAY OUT WAKES US.  cpu_spinuntil_int()
+/  resumes on cpu_triggerint(), which cpu_set_irq_line() also calls, so:
+/
+/    inputFull  FALSE->TRUE   p2k_pumpQueue()   asserts IRQ2, so it triggers
+/    inputFull  TRUE->FALSE   the DSP's own ack - it is running to do that
+/    outputFull FALSE->TRUE   the DSP writing a reply - likewise
+/    outputFull TRUE->FALSE   dcs_p2k_data_r()  no interrupt: triggers explicitly
+/    both cleared on reset    dcs_ctrl_w()      already triggers
+/
+/  If one is missed the board hangs where it waits.  Suspending costs nothing else: the loop's only side
+/  effect is that every 65536 turns 0x3d65 toggles bit 13 of SDRC register 1,
+/  which this emulation does not decode (only DM_ST and MUTE are).
+/
+/  With P2K_DEBUG, P2K_NOLATCHSKIP=1 turns this off at run time
+/-------------------------------------------------------------------------*/
+#define P2K_LATCH_POLL_SPIN 64
+
+#if !P2K_DEBUG
+#define p2k_latchSkip() 1
+#else
+static int p2k_latchSkip(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("P2K_NOLATCHSKIP") ? 0 : 1;
+  return on;
+}
+#endif
+
+static READ16_HANDLER(p2k_latch_status_r) {
+  const UINT16 status = (dcslocals.p2k.inputFull ? 0x80 : 0x00) |
+                        (dcslocals.p2k.outputFull ? 0x00 : 0x40);
+#ifdef DCSIDLESKIP
+  if (DCS_useIdleSkip && p2k_latchSkip()) {
+    if (status != dcslocals.p2k.lastLatchStatus) {
+      dcslocals.p2k.lastLatchStatus = status;
+      dcslocals.p2k.latchPolls = 0;
+    }
+    else if (++dcslocals.p2k.latchPolls >= P2K_LATCH_POLL_SPIN) {
+      dcslocals.p2k.latchPolls = 0;
+      cpu_spinuntil_int();
+    }
+  }
+#endif
+  return status;
+}
+
+/* three extra signal lines back to the host; latched, not otherwise acted on */
+/* when the DSP last touched the output control register; see adsp_sport0Irq() */
+static UINT64 p2k_outputCtrlCycles;
+
+static READ16_HANDLER(p2k_output_control_r) {
+  p2k_outputCtrlCycles = cpunum_gettotalcycles64(dcslocals.brdData.cpuNo);
+  return dcslocals.p2k.outputControl;
+}
+static WRITE16_HANDLER(p2k_output_control_w) {
+  if (dcslocals.p2k.outputControl != data)
+    P2KTRACE(("P2K dsp  ctrl       %04x  @pc %04x\n", data, activecpu_get_pc()));
+  dcslocals.p2k.outputControl = data;
+}
+
+/* DSP-side status at data 0x0413.  This is NOT the host status register --
+   it is the 3-state handshake erikieNL's MAME branch exposes here.  Encore
+   does not map this address at all, so it is the one part of the interface
+   with a single, unconfirmed source.  The host reads dcs_p2k_status_r(). */
+static READ16_HANDLER(p2k_status_r) {
+  switch (dcslocals.p2k.state) {
+    case 1:  return 0x80; /* reply pending  */
+    case 2:  return 0x40; /* reply consumed */
+    default: return 0x00;
+  }
+}
+
+/*--------------------------------------------------------------------------
+/  HLE of the DSP-side boot-block receive loop
+/
+/  The host can push a boot block down the command port.  The opening word is
+/  a standard ADSP boot header: it encodes 8*(hdr+1) 24-bit program words,
+/  which then arrive as three host words each.  (Not exercised by the games
+/  themselves -- they boot from flash -- but erikieNL's MAME branch drives
+/  this path, so a future driver may too.)  The DSP firmware has a receive
+/  loop for this; emulating that loop word-by-word through the command latch
+/  is both slow and fragile, so we intercept the payload here and write the
+/  block straight into program memory, exactly as the reference does.
+/
+/  Note the opening header word is still delivered to the DSP for real -- only
+/  the payload and the closing repeat of the header are swallowed.  Returning
+/  non-zero means "swallowed, do not latch".
+/-------------------------------------------------------------------------*/
+static int p2k_preprocess_write(UINT16 data) {
+  switch (dcslocals.p2k.xferState) {
+    case 0:
+      if (data == 0x000e) {
+        dcslocals.p2k.xferCmd       = data;
+        dcslocals.p2k.xferWordsLeft = (data + 1) * 8;
+        dcslocals.p2k.xferByteCount = 0;
+        dcslocals.p2k.xferTemp      = 0;
+        if (dcslocals.p2k.xferWordsLeft > P2K_XFER_MAX_WORDS)
+          dcslocals.p2k.xferWordsLeft = P2K_XFER_MAX_WORDS;
+        dcslocals.p2k.xferState     = 1;
+        DBGLOG(("P2K boot block: %d words\n", dcslocals.p2k.xferWordsLeft));
+      }
+      return 0; /* header is delivered to the DSP */
+
+    case 1:
+      /* payload words are byte-wide; a non-zero high byte means this is not
+         payload after all, so abort and let the DSP see the header */
+      if (data & 0xff00) {
+        dcslocals.p2k.xferState = 0;
+        p2k_enqueue(dcslocals.p2k.xferCmd); /* re-send the header for real */
+        return 0;                           /* and let the caller send this word */
+      }
+      switch (dcslocals.p2k.xferByteCount) {
+        case 0: dcslocals.p2k.xferTemp  = (data << 16) & 0xff0000; break;
+        case 1: dcslocals.p2k.xferTemp |=  data        & 0x0000ff; break;
+        case 2: dcslocals.p2k.xferTemp |= (data <<  8) & 0x00ff00;
+                if (dcslocals.p2k.xferWordsLeft > 0)
+                  dcslocals.p2k.xferData[dcslocals.p2k.xferWordsLeft - 1] = dcslocals.p2k.xferTemp;
+                break;
+      }
+      if (++dcslocals.p2k.xferByteCount > 2) {
+        dcslocals.p2k.xferByteCount = 0;
+        if (--dcslocals.p2k.xferWordsLeft == 0)
+          dcslocals.p2k.xferState = 2;
+      }
+      return 1; /* swallowed */
+
+    case 2:
+      /* the host repeats the header to commit the block */
+      if (data == dcslocals.p2k.xferCmd) {
+        UINT32 * const pgm = (UINT32 *)(dcslocals.cpuRegion + ADSP2100_PGM_OFFSET);
+        const int words = (dcslocals.p2k.xferCmd + 1) * 8;
+        int i;
+        for (i = 0; i < words && i < P2K_XFER_MAX_WORDS; i++)
+          ADSP2100_WRPGM(&pgm[i], dcslocals.p2k.xferData[i]);
+        DBGLOG(("P2K boot block committed (%d words)\n", words));
+        dcslocals.p2k.xferState = 0;
+      }
+      return 1; /* swallowed */
+  }
+  return 0;
+}
+
 static READ16_HANDLER(dcs_ROMbank_r)   { return dcslocals.ROMbankPtr[offset]; }
 
 static READ16_HANDLER(dcs2_RAMbank_r)  { return dcslocals.RAMbankPtr[offset]; }
@@ -1374,6 +1999,29 @@ static READ16_HANDLER(dcs2_RAMbank_r)  { return dcslocals.RAMbankPtr[offset]; }
 static WRITE16_HANDLER(dcs2_RAMbank_w) { dcslocals.RAMbankPtr[offset] = data; }
 
 static data8_t *dcs_getBootROM(int soft) {
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K) {
+    /* Pin2K boots from the page currently selected in the SDRC.  Which page
+       register applies depends on whether the board is ROM- or RAM-based,
+       exactly as in the SDRC documentation. */
+    /* The ADSP boot port is byte wide and is wired to the LOW byte of each
+       16-bit ROM word, so the page has to be de-interleaved into a byte
+       buffer before it can be handed to the boot loader -- the raw region is
+       not a 24-bit opcode image.  A page is 0x1000 ROM words = 0x2000 bytes. */
+    static data8_t bootBuf[0x1000];
+    const UINT32 page = (dcslocals.p2k.bootrom == dcslocals.p2k.sounddata)
+                        ? SDRC_EPM_PG : SDRC_ROM_PG;
+    const UINT16 * const base =
+      dcslocals.p2k.bootrom + ((page * 0x1000) % dcslocals.p2k.bootromWords);
+    const UINT32 avail = dcslocals.p2k.bootromWords -
+                         ((page * 0x1000) % dcslocals.p2k.bootromWords);
+    const UINT32 count = (avail < 0x1000) ? avail : 0x1000;
+    UINT32 i;
+    for (i = 0; i < count; i++)
+      bootBuf[i] = (data8_t)(base[i] & 0xff);
+    for (; i < 0x1000; i++)
+      bootBuf[i] = 0;
+    return bootBuf;
+  }
   return (data8_t *)(dcslocals.brdData.romRegion +
                     (soft ? ((dcslocals.ROMbank1 & 0xff)<<12) : 0));
 }
@@ -1470,6 +2118,37 @@ static int dcs_custStart(const struct MachineSound *msound) {
   return (dcs_dac.buffer == 0);
 }
 
+/*--------------------------------------------------------------------------
+/  Pin2K stereo DAC
+/
+/  The board has two DMA-driven DACs, but they are fed from the *same*
+/  SPORT1 autobuffer: the DSP writes the two channels interleaved into the
+/  transmit buffer, so there is only one autobuffer to service.  We simply
+/  de-interleave it into two ring buffers here.
+/-------------------------------------------------------------------------*/
+static int p2k_custStart(const struct MachineSound *msound) {
+  static const char *names[2] = { "DCS DAC Left", "DCS DAC Right" };
+  static const int mixlevels[2] = { MIXER(100, MIXER_PAN_LEFT), MIXER(100, MIXER_PAN_RIGHT) };
+
+  memset(&dcs_dac, 0, sizeof(dcs_dac));
+  dcs_dac.stereo = 1;
+
+  dcs_dac.stream = stream_init_multi_float(2, names, mixlevels,
+                                           DCS_DEFAULT_SAMPLE_RATE, 0,
+                                           dcs_dacUpdateStereo, 0);
+
+  dcs_dac.buffer  = malloc(DCS_BUFFER_SIZE * sizeof(INT16));
+  dcs_dac.buffer2 = malloc(DCS_BUFFER_SIZE * sizeof(INT16));
+  if (dcs_dac.buffer)  memset(dcs_dac.buffer,  0, DCS_BUFFER_SIZE * sizeof(INT16));
+  if (dcs_dac.buffer2) memset(dcs_dac.buffer2, 0, DCS_BUFFER_SIZE * sizeof(INT16));
+
+  /* the Pin2K board has no Sallen-Key reconstruction filter chain modelled
+     here; DCS_LOWPASS only ever applied to the WPC boards */
+  //!! TODO: could also implement a filter chain, check schematics
+
+  return (dcs_dac.buffer == 0 || dcs_dac.buffer2 == 0);
+}
+
 static void dcs_custStop(void) {
   if (dcs_dac.buffer)
     { free(dcs_dac.buffer); dcs_dac.buffer = NULL;
@@ -1480,6 +2159,36 @@ static void dcs_custStop(void) {
  #endif
 #endif
     }
+  if (dcs_dac.buffer2)
+    { free(dcs_dac.buffer2); dcs_dac.buffer2 = NULL; }
+}
+
+static void dcs_dacUpdateStereo(int num, INT16 **buffer, int length)
+{
+  int ii;
+
+  if (dcs_dac.status) {
+    for (ii = 0; ii < length; ii++) {
+      if (dcs_dac.sOut == dcs_dac.sIn) break;
+      buffer[0][ii] = dcs_dac.buffer[dcs_dac.sOut];
+      buffer[1][ii] = dcs_dac.buffer2[dcs_dac.sOut];
+      dcs_dac.sOut = (dcs_dac.sOut + 1) & DCS_BUFFER_MASK;
+    }
+    if (ii > 0)
+      core_sound_throttle_adj(dcs_dac.sIn, &dcs_dac.sOut, DCS_BUFFER_SIZE,
+                              stream_get_sample_rate(dcs_dac.stream));
+  }
+  else
+    ii = 0;
+
+  /* ran dry: hold the last sample rather than clicking to silence */
+  if (ii < length) {
+    const int last = (dcs_dac.sOut - 1) & DCS_BUFFER_MASK;
+    for (; ii < length; ii++) {
+      buffer[0][ii] = dcs_dac.status ? dcs_dac.buffer[last]  : 0;
+      buffer[1][ii] = dcs_dac.status ? dcs_dac.buffer2[last] : 0;
+    }
+  }
 }
 
 
@@ -1541,13 +2250,90 @@ static void dcs_dacUpdate(int num, INT16 *buffer, int length)
 /*-------------------
 / Exported interface
 /---------------------*/
+/*--------------------------------------------------------------------------
+/  Pin2K host interface -- 16 bit
+/
+/  The Pin2K protocol is 16-bit end to end (boot-block headers, the boot
+/  payload, and the DSP's replies all use full words), so it cannot be driven
+/  through PinMAME's 8-bit sndbrd latch.  A Pin2K driver should call these
+/  directly.  The 8-bit sndbrd entry points below still work -- they simply
+/  forward -- so the built-in manual sound-command UI keeps functioning.
+/-------------------------------------------------------------------------*/
+void dcs_p2k_data_w(UINT16 data) {
+  DBGLOG(("P2K data_w: %04x\n", data));
+  if (dcslocals.p2k.xferState == 0) P2KTRACE(("P2K host write cmd   %04x\n", data));
+#if P2K_DEBUG
+  if (dcslocals.p2k.xferState == 0) {
+    /* P2K_DSPDUMPAFTER arms the host-command trigger, so a command that recurs
+       can still pick out the right occurrence */
+    static int armed = -1;
+    const char * const after = getenv("P2K_DSPDUMPAFTER");
+    if (armed < 0) armed = after ? 0 : 1;
+    if (after && data == (UINT16)strtol(after, NULL, 16)) armed = 1;
+    else if (armed) p2k_dumpPgm2(data, "P2K_DSPDUMPCMD");
+  }
+#endif
+  if (p2k_preprocess_write(data)) return; /* consumed by the boot-block HLE */
+  dcslocals.p2k.state = 0;                /* command sent */
+  p2k_enqueue(data);
+  p2k_pumpQueue();
+}
+
+UINT16 dcs_p2k_data_r(void) {
+  P2KTRACE(("P2K host read  reply %04x  (full=%d)\n", dcslocals.p2k.outputData, dcslocals.p2k.outputFull));
+  dcslocals.replyAvail = FALSE;
+  dcslocals.p2k.outputFull = FALSE;
+  dcslocals.p2k.state = 2; /* reply consumed */
+#ifdef DCSIDLESKIP
+  /* The only place the DSP's "host has taken my reply" condition becomes true,
+     and the only one of the four transitions that asserts no interrupt of its
+     own - so without this a DSP suspended in p2k_latch_status_r()'s poll would
+     never wake.  See the table there */
+  if (DCS_useIdleSkip)
+    cpu_triggerint(dcslocals.brdData.cpuNo);
+#endif
+  return dcslocals.p2k.outputData;
+}
+
+/* Host status/flag register (BAR4 byte offset 2 on real hardware).
+   These are independent bit flags, not a state machine:
+     bit 6 (0x40) - ready to accept a command; always set
+     bit 7 (0x80) - a response is available
+   plus whatever the host last stashed via dcs_p2k_status_w().  The game does
+   a write-then-read sanity check here during sound board detection, and a
+   register that drops the write reads as a dead board. */
+UINT16 dcs_p2k_status_r(void) {
+  UINT16 f = dcslocals.p2k.flagLatch & 0xff;
+  f |= 0x40;
+  if (dcslocals.p2k.outputFull) f |= 0x80;
+  return f;
+}
+
+void dcs_p2k_status_w(UINT16 data) {
+  dcslocals.p2k.flagLatch = data;
+}
+
+/* Liveness probe: the host writes a byte here and expects to read it back
+   before it will talk to the board at all. */
+void dcs_p2k_echo_w(UINT8 data) {
+  dcslocals.p2k.echo = data;
+}
+
+UINT8 dcs_p2k_echo_r(void) {
+  return dcslocals.p2k.echo;
+}
+
 static READ_HANDLER(dcs_data_r) {
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    return dcs_p2k_data_r() & 0xff;
   dcslocals.replyAvail = FALSE;
   return soundlatch2_r(0) & 0xff;
 }
 
 static WRITE_HANDLER(dcs_data_w) {
   DBGLOG(("Latch_w: %02x\n",data));
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    { dcs_p2k_data_w(data); return; }
   soundlatch_w(0, data); cpu_set_irq_line(dcslocals.brdData.cpuNo, ADSP2105_IRQ2, ASSERT_LINE);
 }
 
@@ -1557,18 +2343,33 @@ static WRITE_HANDLER(dcs_ctrl_w) {
   // Tom: Removed the next line which now prevents some "sound board interface error"
   // if (dcslocals.brdData.subType < 2)
   {
-#ifdef WPCDCSSPEEDUP
+#ifdef DCSIDLESKIP
     // probably a bug in the mame reset handler
     // if a cpu is suspended for some reason a reset will not wake it up
-    cpu_triggerint(dcslocals.brdData.cpuNo);
-#endif /* WPCDCSSPEEDUP */
+    // (only speedup's idle-loop detector ever suspends it, so this is pointless on
+    //  boards that run without it)
+    if (DCS_useIdleSkip)
+      cpu_triggerint(dcslocals.brdData.cpuNo);
+#endif /* DCSIDLESKIP */
     // Reset is triggered on write so just pulse the line
     cpunum_set_reset_line(dcslocals.brdData.cpuNo, PULSE_LINE);
+    if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K) {
+      // a board reset also resets the SDRC ASIC, drops any queued commands and abandons a half-received boot block
+      dcslocals.p2k.inputFull = dcslocals.p2k.outputFull = FALSE;
+      dcslocals.p2k.state = 0;
+      dcslocals.p2k.cmdIn = dcslocals.p2k.cmdOut = 0;
+      dcslocals.p2k.xferState = 0;
+      dcs_dac.havePending = 0;
+      sdrc_reset();
+    }
     adsp_boot(0);
   }
 }
 
 static READ_HANDLER(dcs_ctrl_r) {
+  // the host polls the Pin2K handshake state, not just "reply available" -- it expects 0x40 once a reply has been consumed
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    return (data8_t)dcs_p2k_status_r();
   return dcslocals.replyAvail ? 0x80 : 0x00;
 }
 
@@ -1595,6 +2396,39 @@ static void dcs_init(struct sndbrdData *brdData) {
 
   WPC_gWPC95 = brdData->subType;
 
+  if (brdData->subType == DCS_SUBTYPE_P2K) {
+    UINT8 * const snd = memory_region(DCS_P2K_SNDREGION);
+
+    /* The WPC decoder transcription does not apply here: its entry sequence
+       does not occur in this firmware, and it addresses memory this board
+       banks through the SDRC.  The idle-loop detector does, and matters more
+       than on any WPC board - two thirds of this DSP's opcodes are spin */
+    DCS_useSpeedup  = 0;
+    DCS_useIdleSkip = 1;
+
+    dcslocals.p2k.sram = (UINT16 *)memory_region(DCS_P2K_SRAMREGION);
+
+    dcslocals.p2k.bootrom      = (UINT16 *)dcslocals.brdData.romRegion;
+    dcslocals.p2k.bootromWords = (UINT32)memory_region_length(DCS_ROMREGION) / 2;
+
+    if (snd) { /* separate sound flash supplied by the driver */
+      dcslocals.p2k.sounddata      = (UINT16 *)snd;
+      dcslocals.p2k.sounddataWords = (UINT32)memory_region_length(DCS_P2K_SNDREGION) / 2;
+    }
+    else {     /* EPROM case: boot ROM and sound data are the same region */
+      dcslocals.p2k.sounddata      = dcslocals.p2k.bootrom;
+      dcslocals.p2k.sounddataWords = dcslocals.p2k.bootromWords;
+    }
+    if (dcslocals.p2k.sounddataWords == 0) dcslocals.p2k.sounddataWords = 1;
+    if (dcslocals.p2k.bootromWords   == 0) dcslocals.p2k.bootromWords   = 1;
+
+    sdrc_reset();
+  }
+  else {
+    DCS_useSpeedup  = 1;
+    DCS_useIdleSkip = 1;
+  }
+
   adsp_init(dcs_getBootROM, dcs_txData);
 
   /*-- clear all interrupts --*/
@@ -1620,13 +2454,28 @@ static void dcs_init(struct sndbrdData *brdData) {
 /------------------*/
 /*-- autobuffer SPORT transmission  --*/
 /*-- copy data to transmit into dac buffer --*/
+/*-- fetch one autobuffer word.
+    On the WPC boards the transmit buffer always lives in the CPU region's
+    data space, so index it directly as before.  On Pin2K the buffer may sit
+    anywhere the SDRC maps -- in particular in banked SRAM, which is a
+    different memory region entirely -- so it has to go through the same
+    decode the DSP sees, or we silently transmit the wrong memory. --*/
+INLINE UINT16 dcs_txFetch(const UINT16 * const __restrict mem, UINT16 base, int idx) {
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K) {
+    const UINT16 * const __restrict p = p2k_decode((offs_t)((base + idx) & 0x3fff));
+    return p ? *p : 0;
+  }
+  return mem[idx];
+}
+
 static void dcs_txData(UINT16 start, UINT16 size, UINT16 memStep, double sRate) {
-  const UINT16 * const mem = (UINT16 *)(dcslocals.cpuRegion + ADSP2100_DATA_OFFSET) + start;
+  const UINT16 * const __restrict mem = (UINT16 *)(dcslocals.cpuRegion + ADSP2100_DATA_OFFSET) + start;
   int idx;
 
   // Let the buffer fill naturally, so the throttling mechanism can work.
 //  stream_update(dcs_dac.stream, 0);
-  if (size == 0) /* No data, stop playing */
+  /* No data, stop playing.  A zero step would also hang the loops below. */
+  if (size == 0 || memStep == 0)
   { dcs_dac.status = 0; return; }
 
   if (dcs_dac.status == 0)
@@ -1640,25 +2489,68 @@ static void dcs_txData(UINT16 start, UINT16 size, UINT16 memStep, double sRate) 
 	  //  - call stream_set_sample_rate(dcs_dac.stream, sRate) to update the rate
 	  //  - reinitialize all of the stream filters with the new rate (by reiterating
 	  //    all of the filter setup code in dcs_custStart)
-	  assert(stream_get_sample_rate(dcs_dac.stream) == sRate);
+	  // On the stereo Pin2K board the autobuffer carries two interleaved
+	  // channels, so one output frame consumes two SPORT words and the frame
+	  // rate is half the word rate reported by the SPORT clock divider.
+	  assert(stream_get_sample_rate(dcs_dac.stream) == (dcs_dac.stereo ? sRate * 0.5 : sRate));
   }
 
   // If we were not playing before, pre-load buffer with some silence to prevent jumpy starts. Only happens very rarely.
+  // Note this REPLACES the leading samples rather than prepending to them --
+  // the emitted silence consumes the corresponding input words.
   idx = 0;
   if (dcs_dac.status == 0)
   {
-      const int idx_end = MIN((int)(stream_get_sample_rate(dcs_dac.stream) * 20 / 1000 + 1 + 0.5), size);
-      for (; idx < idx_end; idx += memStep) {
+      /*-- 20ms of frames.  This is a frame count, so in stereo each one
+           consumes two words of input, not one.  --*/
+      const int frameWords = dcs_dac.stereo ? memStep * 2 : memStep;
+      const int frames = (int)(stream_get_sample_rate(dcs_dac.stream) * 20 / 1000 + 1 + 0.5);
+      int f;
+      for (f = 0; f < frames && idx < (int)size; f++, idx += frameWords) {
           dcs_dac.buffer[dcs_dac.sIn] = 0;
+          if (dcs_dac.stereo) dcs_dac.buffer2[dcs_dac.sIn] = 0;
           dcs_dac.sIn = (dcs_dac.sIn + 1) & DCS_BUFFER_MASK;
       }
-
+      dcs_dac.havePending = 0; /* start a fresh frame */
       dcs_dac.status = 1;
   }
-  /*-- size is the size of the buffer not the number of samples --*/
-  for (; idx < size; idx += memStep) {
-    dcs_dac.buffer[dcs_dac.sIn] = mem[idx];
-    dcs_dac.sIn = (dcs_dac.sIn + 1) & DCS_BUFFER_MASK;
+
+  /*-- size is the size of the buffer not the number of samples.
+       Walk one word at a time and pair words into frames, carrying any
+       half-frame across calls: adsp_irqGen hands us quadrant-sized chunks
+       whose word count need not be even, and losing that parity would swap
+       the channels for the rest of the buffer. --*/
+  for (; idx < (int)size; idx += memStep) {
+    const UINT16 w = dcs_txFetch(mem, start, idx);
+    if (!dcs_dac.stereo) {
+      dcs_dac.buffer[dcs_dac.sIn] = w;
+      dcs_dac.sIn = (dcs_dac.sIn + 1) & DCS_BUFFER_MASK;
+    }
+    else if (!dcs_dac.havePending) {
+      dcs_dac.pendingFirst = w;
+      dcs_dac.havePending = 1;
+    }
+    else {
+      /* The first word of each frame drives the RIGHT speaker, by ear against
+         the games' own left/right sound test.  That is an observation about
+         the cabinet, not proof about the buffer - the same result would follow
+         if the board emitted left first and the DAC-to-amp routing crossed the
+         channels downstream.  Encore maps it the other way, so expect mirrored
+         channels if the two are ever compared */
+      dcs_dac.buffer[dcs_dac.sIn]  = w;                     /* left speaker  */
+      dcs_dac.buffer2[dcs_dac.sIn] = dcs_dac.pendingFirst;  /* right speaker */
+      dcs_dac.sIn = (dcs_dac.sIn + 1) & DCS_BUFFER_MASK;
+      dcs_dac.havePending = 0;
+#ifdef PIN2K_SOUND_TEST
+      { const INT32 l = (INT16)w, r = (INT16)dcs_dac.pendingFirst;
+        const INT32 a = (l < 0 ? -l : l), b = (r < 0 ? -r : r);
+        dcs_dac.pcmFrames++;
+        if (a > 8 || b > 8) dcs_dac.pcmNonZero++;
+        if (a > dcs_dac.pcmPeak) dcs_dac.pcmPeak = a;
+        if (b > dcs_dac.pcmPeak) dcs_dac.pcmPeak = b;
+      }
+#endif
+    }
   }
 }
 
@@ -1677,22 +2569,30 @@ enum {
 static struct {
  UINT16  ctrlRegs[32];
  void   *irqTimer;
+ void   *sport0Timer;      /* Pin2K only, see adsp_sport0Irq() */
  data8_t *(*getBootROM)(int soft);
  void   (*txData)(UINT16 start, UINT16 size, UINT16 memStep, double sRate);
 } adsp; /* = {{0},NULL,dcs_getBootROM,dcs_txData};*/
 static void adsp_irqGen(int dummy);
+static void adsp_sport0Irq(int dummy);
 
 static void adsp_init(data8_t *(*getBootROM)(int soft),
                       void (*txData)(UINT16 start, UINT16 size, UINT16 memStep, double sRate)) {
   /* stupid timer/machine init handling in MAME */
   if (adsp.irqTimer) timer_remove(adsp.irqTimer);
+  if (adsp.sport0Timer) timer_remove(adsp.sport0Timer);
   /*-- reset control registers etc --*/
   memset(&adsp, 0, sizeof(adsp));
   adsp.getBootROM = getBootROM;
   adsp.txData = txData;
   adsp.irqTimer = timer_alloc(adsp_irqGen);
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    adsp.sport0Timer = timer_alloc(adsp_sport0Irq);
   /*-- initialize the ADSP Tx callback --*/
-  adsp2105_set_tx_callback(adsp_txCallback);
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    adsp2104_set_tx_callback(adsp_txCallback);
+  else
+    adsp2105_set_tx_callback(adsp_txCallback);
 }
 
 #if MAMEVER < 6300
@@ -1706,11 +2606,29 @@ static void adsp2105_load_boot_data(data8_t *srcdata, data32_t *dstdata) {
 #endif /* MAMEVER */
 
 static void adsp_boot(int soft) {
-  adsp2105_load_boot_data(adsp.getBootROM(soft), (UINT32 *)(dcslocals.cpuRegion+ADSP2100_PGM_OFFSET));
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    /* the 2104 only has a 512-word boot page */
+    adsp2104_load_boot_data(adsp.getBootROM(soft), (UINT32 *)(dcslocals.cpuRegion+ADSP2100_PGM_OFFSET));
+  else
+    adsp2105_load_boot_data(adsp.getBootROM(soft), (UINT32 *)(dcslocals.cpuRegion+ADSP2100_PGM_OFFSET));
   timer_enable(adsp.irqTimer, FALSE);
 }
 
+static READ16_HANDLER(adsp_control_r) {
+  return adsp.ctrlRegs[offset & 0x1f];
+}
+
 static WRITE16_HANDLER(adsp_control_w) {
+#ifdef PIN2K_SOUND_TEST
+  /* every ADSP control-register write, so we can see whether the firmware
+     ever even attempts to bring up SPORT1 (SYSCONTROL bit 0x0800) */
+  if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K)
+    printf("P2K ctrl[%02x] <- %04x%s\n", offset, data,
+           (offset == SYSCONTROL_REG) ? "   (SYSCONTROL)" :
+           (offset == S1_AUTOBUF_REG) ? "   (S1 AUTOBUF)" :
+           (offset == S1_CONTROL_REG) ? "   (S1 CONTROL)" :
+           (offset == S1_SCLKDIV_REG) ? "   (S1 SCLKDIV)" : "");
+#endif
   adsp.ctrlRegs[offset] = data;
   switch (offset) {
     case SYSCONTROL_REG:
@@ -1726,6 +2644,19 @@ static WRITE16_HANDLER(adsp_control_w) {
         dcs_txData(0, 0, 0, 0);
         /* nuke the timer */
         timer_enable(adsp.irqTimer, FALSE);
+      }
+      /*-- Pin2K: SPORT0 is not a serial port here, it is a 1kHz tick --------
+      /  Nothing is wired to SPORT0 on this board; the firmware enables it
+      /  (SYSCONTROL bit 0x1000) purely to get a periodic interrupt, and its
+      /  SPORT0 receive handler is what drains the board's reply queue to the
+      /  host.  Without this tick the board can answer a command but can never
+      /  say anything of its own -- which is exactly where the Pin2K host
+      /  handshake stalls.  MAME does the same thing (dcs.cpp, sport0_irq).  */
+      if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K && adsp.sport0Timer) {
+        if (data & 0x1000)
+          timer_adjust(adsp.sport0Timer, TIME_IN_USEC(10), 0, TIME_IN_HZ(1000));
+        else
+          timer_enable(adsp.sport0Timer, FALSE);
       }
       break;
     case S1_AUTOBUF_REG:
@@ -1754,15 +2685,31 @@ static struct {
   int    irqCount;
 } adsp_aBufData;
 
+/* The interrupt latches inside the DSP, so a pulse is enough.  Non-interrupt
+   code reads/modifies/writes the output control register, so skip the tick if
+   the DSP touched it in the last few cycles -- otherwise the read-modify-write
+   loses the write and, in MAME's experience, sound stops. */
+static void adsp_sport0Irq(int dummy) {
+  if (cpunum_gettotalcycles64(dcslocals.brdData.cpuNo) - p2k_outputCtrlCycles > 5) {
+    cpu_set_irq_line(dcslocals.brdData.cpuNo, ADSP2104_SPORT0_RX, ASSERT_LINE);
+    cpu_set_irq_line(dcslocals.brdData.cpuNo, ADSP2104_SPORT0_RX, CLEAR_LINE);
+  }
+}
+
 static void adsp_irqGen(int dummy) {
   int next;
 
   if (adsp_aBufData.irqCount < DCS_IRQSTEPS) {
     adsp_aBufData.irqCount += 1;
-#ifdef WPCDCSSPEEDUP
-    /* wake up suspended cpu by simulating an interrupt trigger */
-    cpu_triggerint(dcslocals.brdData.cpuNo);
-#endif /* WPCDCSSPEEDUP */
+#ifdef DCSIDLESKIP
+    /* wake up suspended cpu by simulating an interrupt trigger.
+       Only the idle-loop detector calls cpu_spinuntil_int(), so there is
+       nothing to wake on a board that runs without it.  This is the other
+       half of the idle skip and has to follow the same switch: the loop it
+       suspends is waiting for exactly this, the autobuffer index moving on */
+    if (DCS_useIdleSkip)
+      cpu_triggerint(dcslocals.brdData.cpuNo);
+#endif /* DCSIDLESKIP */
   }
   else {
     adsp_aBufData.irqCount = 1;
@@ -1801,10 +2748,46 @@ static void adsp_txCallback(int port, INT32 data) {
     /* start = In, size = Ln, step = Mn */
     adsp_aBufData.step  = activecpu_get_reg(ADSP2100_M0 + mreg);
     adsp_aBufData.size  = activecpu_get_reg(ADSP2100_L0 + ireg);
-    /*-- assume that the first sample comes from the memory position before --*/
-    adsp_aBufData.start = activecpu_get_reg(ADSP2100_I0 + ireg) - adsp_aBufData.step;
+    if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K) {
+      /*-- The board aligns the autobuffer source down to a 16-word boundary
+           rather than undoing one M increment.  This matters more here than
+           it would on a mono board: with two interleaved channels, a base
+           that is one word out swaps left and right for the whole stream. --*/
+      adsp_aBufData.start = activecpu_get_reg(ADSP2100_I0 + ireg) & ~0x0f;
+      cpunum_set_reg(dcslocals.brdData.cpuNo, ADSP2100_I0 + ireg, adsp_aBufData.start);
+    }
+    else
+      /*-- assume that the first sample comes from the memory position before --*/
+      adsp_aBufData.start = activecpu_get_reg(ADSP2100_I0 + ireg) - adsp_aBufData.step;
     adsp_aBufData.sRate = Machine->drv->cpu[dcslocals.brdData.cpuNo].cpu_clock /
                            (2 * (adsp.ctrlRegs[S1_SCLKDIV_REG] + 1)) / 16;
+    if (dcslocals.brdData.subType == DCS_SUBTYPE_P2K) {
+      /*-- This board runs MOSTLY at a fixed 31250 frames/sec.
+
+           S1_CONTROL bit 14 nominally selects the SPORT clock source, and
+           real RFM/SWEP1 firmware sets it with SCLKDIV=4, which would derive
+           50000.  Deriving that plays everything 1.6x too fast, so the bit
+           is not describing what actually clocks the DACs -- the board feeds
+           them an external 31.25 kHz sample clock regardless.  Both
+           references reached the same conclusion: Encore hardcodes 31250 and
+           erikieNL's MAME branch added an explicit Pin2K test to defeat the
+           derivation.
+
+           The derived value is still computed and logged, so a board that
+           genuinely does drive its own clock will be visible rather than
+           silently forced. --*/
+      const double derived   = adsp_aBufData.sRate * 0.5;
+      const double frameRate = (double)DCS_DEFAULT_SAMPLE_RATE;
+      if (derived != frameRate)
+        DBGLOG(("P2K: SCLKDIV=%d (S1_CONTROL %04x) derives %.0f frames/s, "
+                "using %.0f\n", adsp.ctrlRegs[S1_SCLKDIV_REG],
+                adsp.ctrlRegs[S1_CONTROL_REG], derived, frameRate));
+      adsp_aBufData.sRate = frameRate * 2.0; /* two words per stereo frame */
+      if (stream_get_sample_rate(dcs_dac.stream) != frameRate) {
+        stream_set_sample_rate(dcs_dac.stream,     frameRate);
+        stream_set_sample_rate(dcs_dac.stream + 1, frameRate);
+      }
+    }
     adsp_aBufData.iReg = ireg;
     adsp_aBufData.irqCount = adsp_aBufData.last = 0;
     adsp_irqGen(0); /* first part, rest is handled via the timer */
@@ -2891,3 +3874,314 @@ UINT32 dcs_speedup_1993(UINT32 pc)
     return 0;                                              /* execute a NOP */
 }
 #endif /* WPCDCSSPEEDUP */
+
+#ifdef PIN2K_SOUND_TEST
+/*--------------------------------------------------------------------------
+/  Pinball 2000 sound board test harness            -- DIAGNOSTIC, NOT A GAME
+/
+/  PinMAME has no Pin2K game driver yet, so nothing would otherwise initialise the
+/  DCS2 board or send it commands.  This is the smallest thing that does: the
+/  ADSP-2104 is the only CPU, and there is no playfield, display or switches.
+/
+/  Enable with PIN2K_SOUND_TEST (see pinmame.h), then run 'pin2ksnd' (Revenge
+/  From Mars) or 'pin2ksw1' (Star Wars Episode I).  Each needs its sound flash
+/  plus the U109/U110 pair -- see ROM_START below.
+/
+/  State on real firmware, identical for both games: the board boots, pages in
+/  its program, runs its mixer and transmits stereo PCM at the rate the
+/  firmware asks for -- but only ever silence, because the host-side protocol
+/  that starts a voice is not known yet.  See docs/pin2k_sound.md.
+/
+/  Useful output:
+/    dac(on=1), `wr' climbing   -> autobuffer is delivering
+/    sport(... frames=N)        -> rate the firmware selected
+/    pcm nonzero=/peak=         -> whether that PCM is audio or silence
+/    NEW reply value            -> the board said something it had not before
+/-------------------------------------------------------------------------*/
+
+/* Nothing plays until the host completes the initialisation the board expects,
+   and that stream lives in PC-side game code we do not have.  This is the best
+   approximation found by experiment: it boots the board, initialises it and
+   gets PCM flowing, but so far never gets a voice to play.
+
+   Established by observation (full log in docs/pin2k_sound.md):
+     0x55aa/0x55ab  sync handshake; the board answers 0x55ab.  Taken from the
+                    game's own dispatcher (game.rom +0x0d90e9, a cmp eax,imm32
+                    chain that also tests 0xace1/0xacef).  Without it the board
+                    never replies after 0xace1 at all.
+     0xace1         runs the mixer init and enables SPORT1; the board then
+                    answers 0x000a and stays silent from that point on.
+     0x000a         appears to mean ready/idle.
+   Repeating the sync after 0xace1 does not reopen the conversation, and
+   0x8280/0xacef have no observable effect, so neither is sent. */
+static const struct { UINT16 cmd; const char *what; } pin2ksnd_script[] = {
+  { 0x55aa, "sync A"       },
+  { 0x55ab, "sync B"       },
+  { 0xace1, "ACE1 open"    },
+  { 0x03ce, "track id"     },
+  { 0xff7f, "volume/pan"   },
+  { 0x8180, "channel zero" }
+};
+
+/* printf rather than DBGLOG on purpose: DBGLOG compiles out unless the build
+   defines MAME_DEBUG, and this can be usable in a release build. */
+static void pin2ksnd_dump(const char *tag) {
+  const UINT32 * const pgm = (const UINT32 *)(dcslocals.cpuRegion + ADSP2100_PGM_OFFSET);
+  const unsigned pc = (unsigned)cpunum_get_reg(0, ADSP2100_PC);
+  printf("PIN2K[%-5s] pc=%04x op=%06x pm[0]=%06x  sdrc=%04x/%04x/%04x"
+         "  sysctl=%04x autobuf=%04x  dac(on=%d wr=%5d rd=%5d)"
+         "  sport(size=%d step=%d sclkdiv=%d words=%.0f frames=%.0f)  status=%04x\n",
+         tag, pc, pgm[pc & 0x3fff] & 0xffffff, pgm[0] & 0xffffff,
+         dcslocals.p2k.reg[0], dcslocals.p2k.reg[1], dcslocals.p2k.reg[2],
+         adsp.ctrlRegs[SYSCONTROL_REG], adsp.ctrlRegs[S1_AUTOBUF_REG],
+         dcs_dac.status, dcs_dac.sIn, dcs_dac.sOut,
+         adsp_aBufData.size, adsp_aBufData.step,
+         adsp.ctrlRegs[S1_SCLKDIV_REG], adsp_aBufData.sRate,
+         stream_get_sample_rate(dcs_dac.stream),
+         dcs_p2k_status_r());
+  /* the decisive question: is the PCM we are transmitting silence or audio? */
+  printf("PIN2K[%-5s] pcm frames=%u nonzero=%u peak=%d  soundEn=%d\n",
+         tag, dcs_dac.pcmFrames, dcs_dac.pcmNonZero, dcs_dac.pcmPeak,
+         coreGlobals.soundEn);
+}
+
+/*--------------------------------------------------------------------------
+/  Reply tracking
+/
+/  Every reply the board makes is recorded, including the ones consumed
+/  during the sweep.  Printing each one is useless, and printing none hides
+/  the interesting ones -- so keep a table of distinct values and announce
+/  each the first time it appears.  Only three replies have ever been seen in
+/  a whole run (0x000a twice, 0x55ab once) so far, so a new value is significant.
+/
+/  0x000c is called out specially because both references treat it as the
+/  marker of a post-0xace1 handshake (erikieNL's MAME code watches for the DSP to emit
+/  0x0c; Encore's code acks 0xace1 with 0x0100/0x000c).  This board has never been
+/  observed emitting it so far, which is itself worth knowing.
+/-------------------------------------------------------------------------*/
+static struct { UINT16 val; UINT32 count; } pin2ksnd_replyKind[32];
+static int    pin2ksnd_replyKinds = 0;
+static UINT32 pin2ksnd_replyTotal = 0;
+
+static void pin2ksnd_noteReply(UINT16 v) {
+  int i;
+  pin2ksnd_replyTotal++;
+  for (i = 0; i < pin2ksnd_replyKinds; i++)
+    if (pin2ksnd_replyKind[i].val == v) { pin2ksnd_replyKind[i].count++; return; }
+  if (pin2ksnd_replyKinds < 32) {
+    pin2ksnd_replyKind[pin2ksnd_replyKinds].val = v;
+    pin2ksnd_replyKind[pin2ksnd_replyKinds].count = 1;
+    pin2ksnd_replyKinds++;
+    printf("PIN2K: NEW reply value %04x (reply #%u)%s\n", v, pin2ksnd_replyTotal,
+           (v == 0x000c) ? "   <-- script-mode handshake marker" : "");
+  }
+}
+
+static void pin2ksnd_replySummary(void) {
+  int i;
+  printf("PIN2K: %u replies total, %d distinct:", pin2ksnd_replyTotal, pin2ksnd_replyKinds);
+  for (i = 0; i < pin2ksnd_replyKinds; i++)
+    printf(" %04x(x%u)", pin2ksnd_replyKind[i].val, pin2ksnd_replyKind[i].count);
+  printf("\n");
+}
+
+/*-- drain and report anything the DSP has sent back --*/
+static void pin2ksnd_drain(void) {
+  int n = 0;
+  while ((dcs_p2k_status_r() & 0x80) && n++ < 8) {
+    const UINT16 v = dcs_p2k_data_r();
+    printf("PIN2K: reply %04x\n", v);
+    pin2ksnd_noteReply(v);
+  }
+}
+
+/*-- one-shot dump of the loop the firmware settles into, so it can be
+     disassembled offline and we can see what it is actually waiting for --*/
+static void pin2ksnd_dumpLoop(void) {
+  const UINT32 * const pgm = (const UINT32 *)(dcslocals.cpuRegion + ADSP2100_PGM_OFFSET);
+  unsigned a;
+  printf("PIN2K: --- program memory 3d80-3dd0 ---\n");
+  for (a = 0x3d80; a <= 0x3dd0; a++)
+    printf("PIN2K: pm[%04x] = %06x\n", a, pgm[a] & 0xffffff);
+  printf("PIN2K: --- data 0000-000f (SDRC ROM window) ---\n");
+  for (a = 0; a < 0x10; a++) {
+    const UINT16 *p = p2k_decode(a);
+    printf("PIN2K: dm[%04x] = %04x\n", a, p ? *p : 0xffff);
+  }
+}
+
+static void pin2ksnd_watch(int n) {
+  char tag[8];
+  sprintf(tag, "t+%ds", n);
+  pin2ksnd_dump(tag);
+  pin2ksnd_drain();
+  if (n == 2) pin2ksnd_dumpLoop();
+  if (n < 12) timer_set(TIME_IN_SEC(1.0), n + 1, pin2ksnd_watch);
+}
+
+/*--------------------------------------------------------------------------
+/  Track sweep
+/
+/  We do not know the host's full ACE1 init stream, and we do not know which
+/  track IDs exist in a given ROM set.  Rather than keep guessing, walk the
+/  ID space sending a play triple for each and watch whether any PCM comes
+/  out.  Encore's generator probes IDs the same way -- invalid ones simply
+/  do not create a voice.  A hit tells us the mixer is fully functional and
+/  gives us a known-good ID to work from.
+/-------------------------------------------------------------------------*/
+#define PIN2K_SWEEP_MAX 0x0800
+
+static void pin2ksnd_sweepCheck(int id);
+
+/*-- consume replies without printing: during the sweep we do not care what
+     the board says, but we must keep taking it.  A reply left sitting in the
+     output latch keeps outputFull set, and firmware that waits for the host
+     to collect a reply before accepting the next command would stall -- every
+     subsequent ID would then look silent for the wrong reason. --*/
+static void pin2ksnd_drainQuiet(void) {
+  int n = 0;
+  while ((dcs_p2k_status_r() & 0x80) && n++ < 16)
+    pin2ksnd_noteReply(dcs_p2k_data_r()); /* recorded, not printed */
+}
+
+static void pin2ksnd_sweep(int id) {
+  if (id > PIN2K_SWEEP_MAX) {
+    printf("PIN2K: sweep finished, no track produced audio\n");
+    pin2ksnd_replySummary();
+    return;
+  }
+  pin2ksnd_drainQuiet();
+  dcs_dac.pcmNonZero = 0;
+  dcs_dac.pcmPeak = 0;
+  dcs_p2k_data_w((UINT16)id); /* track */
+  dcs_p2k_data_w(0xff7f);     /* full volume, centre pan */
+  dcs_p2k_data_w(0x8180);     /* channel zero */
+  timer_set(TIME_IN_MSEC(80), id, pin2ksnd_sweepCheck);
+}
+
+static void pin2ksnd_sweepCheck(int id) {
+  if (dcs_dac.pcmPeak > 0)
+    printf("PIN2K: *** track %04x PRODUCED AUDIO  peak=%d nonzero=%u ***\n",
+           id, dcs_dac.pcmPeak, dcs_dac.pcmNonZero);
+  else if ((id & 0x0f) == 0) { /* ~every 1.4s, so progress is visible */
+    printf("PIN2K: sweep at %04x, silent so far (status=%04x)\n",
+           id, dcs_p2k_status_r());
+    if ((id & 0xff) == 0) pin2ksnd_replySummary();
+  }
+  pin2ksnd_drainQuiet();
+  timer_set(TIME_IN_MSEC(10), id + 1, pin2ksnd_sweep);
+}
+
+static void pin2ksnd_probe(int step) {
+  if (step == 0) {
+    /* liveness probe first: the real host will not talk to a board that cannot echo a byte back */
+    dcs_p2k_echo_w(0x5a);
+    if (dcs_p2k_echo_r() != 0x5a)
+      printf("PIN2K: echo probe FAILED\n");
+    pin2ksnd_dump("boot");
+    pin2ksnd_drain(); /* the board usually announces itself after reset */
+  }
+  else
+    pin2ksnd_drain(); /* whatever the previous command produced */
+  if (step < (int)(sizeof(pin2ksnd_script)/sizeof(pin2ksnd_script[0]))) {
+    printf("PIN2K: sending %04x  (%s)\n",
+           pin2ksnd_script[step].cmd, pin2ksnd_script[step].what);
+    dcs_p2k_data_w(pin2ksnd_script[step].cmd);
+    /* 50ms so the firmware has time to answer each one individually --
+       we want to know which command it accepts, not just the last reply */
+    timer_set(TIME_IN_MSEC(50), step + 1, pin2ksnd_probe);
+  }
+  else {
+    pin2ksnd_dump("sent");
+    pin2ksnd_drain();
+    pin2ksnd_replySummary();
+    /* the scripted triple produced nothing, so go looking for a track that
+       does -- see pin2ksnd_sweep() */
+    if (dcs_dac.pcmPeak == 0)
+      timer_set(TIME_IN_SEC(1.0), 1, pin2ksnd_sweep);
+    /* then watch for a while: `dac wr' climbing means the SPORT autobuffer
+       is delivering samples, which is the whole point of the exercise */
+    timer_set(TIME_IN_SEC(1.0), 0, pin2ksnd_watch);
+  }
+}
+
+static MACHINE_INIT(pin2ksnd) {
+  /* the ADSP is CPU 0 here, so cpuNo = 0 rather than the usual DCS_CPUNO */
+  sndbrd_0_init(SNDBRD_DCSP2K, 0, memory_region(DCS_ROMREGION), NULL, NULL);
+  /* give the board time to boot and bring up SPORT1 before poking it */
+  timer_set(TIME_IN_SEC(2.0), 0, pin2ksnd_probe);
+}
+
+/* buffers are released by dcs_custStop via the custom sound interface, so
+   no machine stop handler is needed (same as the LOTR sound test driver) */
+
+/* A display layout is NOT optional, even for a board with no display:
+   core_init() calls core_initDisplaySize(core_gameData->lcdLayout) before it
+   checks that pointer for NULL (core.c), so a NULL layout
+   dereferences `length' at offset 6 and takes the whole thing down.  One
+   7-segment digit is the cheapest thing that keeps the renderer happy. */
+static core_tLCDLayout pin2ksnd_disp[] = {
+  {0, 0, 0, 1, CORE_SEG7}, {0}
+};
+static core_tGameData pin2ksndGameData = {0, pin2ksnd_disp};
+static void init_pin2ksnd(void) { core_gameData = &pin2ksndGameData; }
+
+INPUT_PORTS_START(pin2ksnd)
+INPUT_PORTS_END
+
+MACHINE_DRIVER_START(pin2ksnd)
+  MDRV_IMPORT_FROM(PinMAME)
+  MDRV_CORE_INIT_RESET_STOP(pin2ksnd,NULL,NULL)
+  MDRV_IMPORT_FROM(wmssnd_dcs3)
+MACHINE_DRIVER_END
+
+ROM_START(pin2ksnd)
+  NORMALREGION(ADSP2100_SIZE, REGION_CPU1)
+  NORMALREGION(0x8000*2,      DCS_P2K_SRAMREGION)
+  /* One unified 0x600000-word sound address space, which is how the board
+     actually sees it:
+        word 0x000000  28F800 sound flash   (also the boot device)
+        word 0x200000  U109
+        word 0x400000  U110
+     The gaps between them are real address-space gaps, not padding.  The two
+     sample chips are 16-bit words interleaved at 32-bit stride, hence
+     ROM_LOAD32_WORD at byte offsets 0x400000 and 0x400002.
+
+     DCS_P2K_SNDREGION is deliberately NOT declared: with a single region the
+     SDRC runs in its "EPROM" mode, where boot ROM and sample data are the
+     same space and EPM_PG pages within it.  That matches the hardware, and
+     it is the page register the firmware actually programs. */
+  SOUNDREGION(0xc00000, DCS_ROMREGION)
+    ROM_LOAD        ("rfm_28f800.rom", 0x000000, 0x100000,
+                     CRC(a57c55ad) SHA1(60ee230b8978b7c5f1482b1b587d1c6db5fdd20e))
+    ROM_LOAD32_WORD ("rfm_u109.bin",   0x400000, 0x400000,
+                     CRC(385f1255) SHA1(0a3be261cd35cd153eff95335597bca46b760568))
+    ROM_LOAD32_WORD ("rfm_u110.bin",   0x400002, 0x400000,
+                     CRC(2258dbde) SHA1(0c9e62e45fa7cc03aedd43a6e06fee28b2f288a5))
+ROM_END
+
+CORE_GAMEDEFNV(pin2ksnd,"Pinball 2000 Sound Board, RFM (test harness)",1999,"Williams",pin2ksnd,0)
+
+/* Star Wars Episode I, same board and same code path -- only the data
+   differs, but so that the two can be A/B'd without a
+   rebuild: if one behaves oddly it is far quicker to tell "our emulation"
+   from "that particular data set" by switching games than by changing code. */
+static void init_pin2ksw1(void) { core_gameData = &pin2ksndGameData; }
+
+INPUT_PORTS_START(pin2ksw1)
+INPUT_PORTS_END
+
+ROM_START(pin2ksw1)
+  NORMALREGION(ADSP2100_SIZE, REGION_CPU1)
+  NORMALREGION(0x8000*2,      DCS_P2K_SRAMREGION)
+  SOUNDREGION(0xc00000, DCS_ROMREGION)
+    ROM_LOAD        ("swe1_28f800.rom", 0x000000, 0x100000,
+                     CRC(5fc1fd2c) SHA1(0967db9b6e82d386d3a8415bbef40bcab5a06654))
+    ROM_LOAD32_WORD ("swe1_u109.rom",   0x400000, 0x400000,
+                     CRC(cc08936b) SHA1(fc428393e8a0cf37b800dd475fd293a1a98c4bcf))
+    ROM_LOAD32_WORD ("swe1_u110.rom",   0x400002, 0x400000,
+                     CRC(6011ecd9) SHA1(8575958c8942a6cbcb2ac18f291fcada6f8cbc09))
+ROM_END
+
+CORE_CLONEDEFNV(pin2ksw1,pin2ksnd,"Pinball 2000 Sound Board, SWEP1 (test harness)",1999,"Williams",pin2ksnd,0)
+#endif /* PIN2K_SOUND_TEST */
