@@ -17,51 +17,6 @@
 #include "xtal.h"
 #include "attotime.h"
 
-// Optimization for address_space::fast(): 0 = scalar (four compares and four branches), 1 = SSE2, 2 = NEON
-#if defined(_M_ARM64EC) || defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON) || defined(__ARM_NEON__)
-  #define P2K_FAST_SIMD_HAVE_NEON 1
-#else
-  #define P2K_FAST_SIMD_HAVE_NEON 0
-#endif
-#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-  #define P2K_FAST_SIMD_HAVE_SSE2 1
-#else
-  #define P2K_FAST_SIMD_HAVE_SSE2 0
-#endif
-
-#ifndef P2K_FAST_SIMD
-  #if P2K_FAST_SIMD_HAVE_NEON
-    #define P2K_FAST_SIMD 2
-  #elif P2K_FAST_SIMD_HAVE_SSE2
-    #define P2K_FAST_SIMD 1
-  #else // 32-bit x86 without SSE2, ARM without NEON (including MSVC's ARM32, which defines neither __ARM_NEON nor _M_ARM64), anything else. Always correct, just not branchless
-    #define P2K_FAST_SIMD 0
-  #endif
-#endif
-
-#if P2K_FAST_SIMD == 1
-  #if !P2K_FAST_SIMD_HAVE_SSE2
-    #error "P2K_FAST_SIMD=1 selects the SSE2 backend; build for x64 or with -msse2 / /arch:SSE2"
-  #endif
-  #include <emmintrin.h>
-#elif P2K_FAST_SIMD == 2
-  #if !P2K_FAST_SIMD_HAVE_NEON
-    #error "P2K_FAST_SIMD=2 selects the NEON backend, which this target does not have"
-  #endif
-  #include <arm_neon.h>
-#endif
-
-#if P2K_FAST_SIMD
-static ATTR_FORCE_INLINE unsigned p2k_ctz32(unsigned v)
-{
-#if defined(_MSC_VER)
-	unsigned long i; _BitScanForward(&i, v); return unsigned(i);
-#else
-	return unsigned(__builtin_ctz(v));
-#endif
-}
-#endif
-
 enum endianness_t { ENDIANNESS_LITTLE, ENDIANNESS_BIG };
 
 #define NATIVE_ENDIAN_VALUE_LE_BE(leval, beval) (leval)
@@ -176,7 +131,7 @@ public:
 
 // Backing memory is supplied by the host (the P2K machine glue). Like MAME's 32-bit little
 // endian bus, every access is presented dword-aligned with a byte-lane mask; the byte and word
-// entry points below do the lane shifting, so a handler never sees an unaligned address.
+// entry points below do the lane shifting, so a handler never sees an unaligned address
 struct p2k_bus_callbacks
 {
 	u32 (*read32)(void *ctx, offs_t addr, u32 mask);
@@ -298,26 +253,27 @@ public:
 		base += head; mem += head; size -= head;
 		size &= ~size_t(3);
 		if (size < 4) return;
-		const unsigned i = m_fast_n++;
-		m_base[i] = base;
-		m_span[i] = u32(size);
-		m_mem[i]  = mem;
-		m_span_biased[i] = u32(size) ^ 0x80000000u; // see the SIMD form in fast()
+		m_fast[m_fast_n++] = { base, u32(size), uintptr_t(mem) - base };
 	}
 	// Zeroing the slots is the part that actually disarms them: fast() tests all MAX_FAST entries
 	// unconditionally and never consults m_fast_n, so resetting the count alone would leave every
 	// registered window still live - exactly the wrong outcome for the bus-probe case above.
-	// An empty slot has span 0, and u32(a - 0) < 0 is false for every a; biased, that is the
-	// smallest signed value, which no biased offset compares below. So zeroed really is disarmed
-	// in both forms.
-	void clear_fast_windows()
+	// A zeroed slot has span 0, and u32(a - 0) < 0 is false for every a, so it can never match
+	void clear_fast_windows() { for (auto &w : m_fast) w = {}; m_fast_n = 0; }
+
+	// Hand out the window containing `a` as a pre-biased pointer plus its range, so a caller that
+	// walks a run of sequential addresses can serve them itself instead of coming back per byte.
+	// The i386 core's FETCH cursor uses this; see fetch_slow() in mame/cpu/i386/i386.cpp. Same
+	// first-match rule as fast(), and an empty slot has span 0 so it can never match.
+	//
+	// The caller owns the invalidation: this range stays correct only while the windows are the
+	// ones registered here (they are installed once, at machine build) AND while the caller's own
+	// address translation is the identity - which for the i386 means paging off and A20 unmasked
+	bool direct_range(offs_t a, uintptr_t &adj, u32 &lo, u32 &len) const
 	{
-		for (unsigned i = 0; i < MAX_FAST; i++)
-		{
-			m_base[i] = 0; m_span[i] = 0; m_mem[i] = nullptr;
-			m_span_biased[i] = 0x80000000u;
-		}
-		m_fast_n = 0;
+		for (const auto &w : m_fast)
+			if (u32(a - w.base) < w.span) { adj = w.adj; lo = w.base; len = w.span; return true; }
+		return false;
 	}
 
 	static constexpr int data_width() { return 32; }
@@ -332,7 +288,7 @@ private:
 	static constexpr unsigned MAX_FAST = 4;
 
 	// The guest is little endian and so is every host this is built for; the byte-wise form is
-	// there so a big endian host still produces the same value as the machine's own read_le().
+	// there so a big endian host still produces the same value as the machine's own read_le()
 	static ATTR_FORCE_INLINE u32 load32(const u8 * const p)
 	{
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
@@ -377,39 +333,12 @@ private:
 		// zeroed, and u32(a - 0) < 0 is false for every a, so an empty slot can never match
 		static_assert(MAX_FAST == 4);
 
-#if P2K_FAST_SIMD
-		// All four windows tested at once, branchlessly. The LOWEST set bit wins, which is the same first-match rule the
-		// scalar form follows by falling through in order. Windows are allowed to overlap, so which
-		// one wins has to stay the same across all three forms
-  #if P2K_FAST_SIMD == 1
-		// SSE2 has no unsigned compare, so both sides are biased into signed space. The spans are
-		// stored pre-biased (add_fast_window does it) to keep the xor off the hot path
-		const __m128i va  = _mm_set1_epi32(int(a));
-		const __m128i d   = _mm_sub_epi32(va, _mm_load_si128(reinterpret_cast<const __m128i *>(m_base)));
-		const __m128i hit = _mm_cmplt_epi32(_mm_xor_si128(d, _mm_set1_epi32(int(0x80000000u))),
-		                                    _mm_load_si128(reinterpret_cast<const __m128i *>(m_span_biased)));
-		const unsigned mask = unsigned(_mm_movemask_ps(_mm_castsi128_ps(hit)));
-  #else
-		// NEON has a native unsigned compare, so it uses the plain spans and needs no bias. It has
-		// no movemask either: AND the all-ones lanes with {1,2,4,8} and OR the four lanes together.
-		// vorr/vget_lane are ARMv7-NEON as well as AArch64, so this does not need vaddvq_u32
-		static const u32 k_lane_bits[MAX_FAST] = { 1u, 2u, 4u, 8u };
-		const uint32x4_t d   = vsubq_u32(vdupq_n_u32(u32(a)), vld1q_u32(m_base));
-		const uint32x4_t hit = vcltq_u32(d, vld1q_u32(m_span));
-		const uint32x4_t bits = vandq_u32(hit, vld1q_u32(k_lane_bits));
-		const uint32x2_t pair = vorr_u32(vget_low_u32(bits), vget_high_u32(bits));
-		const unsigned mask = vget_lane_u32(pair, 0) | vget_lane_u32(pair, 1);
-  #endif
-		if (!mask) return nullptr;
-		const unsigned i = p2k_ctz32(mask);
-		return m_mem[i] + (a - m_base[i]);
-#else
-		if (u32(a - m_base[0]) < m_span[0]) return m_mem[0] + (a - m_base[0]);
-		if (u32(a - m_base[1]) < m_span[1]) return m_mem[1] + (a - m_base[1]);
-		if (u32(a - m_base[2]) < m_span[2]) return m_mem[2] + (a - m_base[2]);
-		if (u32(a - m_base[3]) < m_span[3]) return m_mem[3] + (a - m_base[3]);
+		// Note: A branchless SSE2/NEON form that tested all four at once was tried and removed as it was way slower
+		if (u32(a - m_fast[0].base) < m_fast[0].span) return reinterpret_cast<u8 *>(m_fast[0].adj + a);
+		if (u32(a - m_fast[1].base) < m_fast[1].span) return reinterpret_cast<u8 *>(m_fast[1].adj + a);
+		if (u32(a - m_fast[2].base) < m_fast[2].span) return reinterpret_cast<u8 *>(m_fast[2].adj + a);
+		if (u32(a - m_fast[3].base) < m_fast[3].span) return reinterpret_cast<u8 *>(m_fast[3].adj + a);
 		return nullptr;
-#endif
 	}
 
 	ATTR_FORCE_INLINE u32 r32(offs_t a, u32 mask)
@@ -427,26 +356,29 @@ private:
 	// the machine's range decode behind it. Only for ranges that are pure memory: no side effect on
 	// access, no device behind them. The machine registers these; see address_space::add_fast_window.
 
-	// Structure of arrays, not an array of structs, and the compare operands first. The eight
-	// values fast() actually tests then sit in 32 contiguous bytes instead of being interleaved
-	// with the pointers it only needs once it has a hit - and the whole table is one aligned
-	// cache line. It is also the layout P2K_FAST_SIMD needs: one aligned load per operand vector
+	struct win
+	{
+		u32 base; // first address, always dword-aligned (add_fast_window trims it)
+		u32 span; // usable size, always a whole number of dwords: an access fits iff off < span
+		// The backing store, pre-biased: uintptr_t(mem) - base. A hit is then `adj + a`, which is
+		// a single x86 addressing mode, where storing `mem` would put a sub AND an add on the
+		// load's critical path.
+		//
+		// uintptr_t, not u8*: on a 32-bit build with a high base (0xc0800000) this wraps, which is
+		// well-defined for an unsigned integer and folds back to the right address mod 2^32, where
+		// forming the same value as a pointer would be undefined behaviour
+		uintptr_t adj;
+	};
+	// 16 bytes each, so the four windows are exactly one 64-byte line and the aligned table never
+	// straddles two. Each entry is also self-contained: a hit reads base, span and adj from the
+	// same 16 bytes, rather than from three arrays 16 bytes apart.
 	//
-	// m_cb goes last: it is only touched on a miss.
-	alignas(64) u32 m_base[MAX_FAST] {};
-	u32 m_span[MAX_FAST] {};
-	// The same spans biased into signed space, for the SSE2 backend only - the scalar and NEON
-	// forms compare m_span directly, NEON having a native unsigned compare. It is kept
-	// unconditionally rather than behind the backend switch so that the class layout does not
-	// depend on P2K_FAST_SIMD; 16 bytes is worth not having an ODR hazard.
-	//
-	// NOT zero-initialised: an empty slot must be the smallest signed value so nothing compares
-	// below it, and a zeroed entry here would instead match every address under 0x80000000 and
-	// return m_mem[i] == nullptr. Kept in step with m_span by add_fast_window()/clear_fast_windows().
-	u32 m_span_biased[MAX_FAST] { 0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u };
-	u8 *m_mem[MAX_FAST] {};
-	unsigned m_fast_n = 0;
+	// Ordered hottest first: m_fast on every access, m_cb on every miss, m_fast_n only when a
+	// window is registered - fast() deliberately never reads it. Everything after m_fast lands in
+	// the second line either way, so this is for legibility only
+	alignas(64) win m_fast[MAX_FAST] {};
 	p2k_bus_callbacks m_cb;
+	unsigned m_fast_n = 0;
 };
 
 enum read_or_write { ROW_READ = 1, ROW_WRITE = 2, ROW_READWRITE = 3 };
@@ -536,7 +468,7 @@ class emu_timer final
 {
 	friend class device_scheduler;
 public:
-	void adjust(attotime start_delay, s32 param = 0, attotime period = attotime::never);
+	void adjust(const attotime& start_delay, s32 param = 0, const attotime& period = attotime::never);
 	void reset() { adjust(attotime::never); }
 	void enable(bool enable = true) { m_enabled = enable; }
 	bool enabled() const { return m_enabled; }
@@ -598,13 +530,38 @@ public:
 	}
 
 	// advance time to `target`, firing every timer that comes due on the way
-	void advance_to(attotime target);
+	void advance_to(const attotime& target);
 
-	void set_time(attotime t) { m_time = t; }
+	void set_time(const attotime& t) { m_time = t; }
+
+	// Run whatever is already due, without advancing time.
+	//
+	// MAME's scheduler aborts the running CPU's timeslice when a timer is set to expire inside it,
+	// which is what makes timer_set(attotime::zero) - "do this now" - take effect at the next
+	// instruction. This shim does not: run_cycles() reads next_expiry() before cpu.run() and
+	// nothing cuts the run short, so a zero-delay timer set *by the guest* mid-slice waits for the
+	// slice to end. Timers set by other timers are fine, because advance_to() drains what its own
+	// callbacks schedule.
+	//
+	// That mattered: the guest changes the interrupt controller's mask constantly, and
+	// pic8259_device uses a zero-delay timer to re-evaluate its INT output, so delivery landed
+	// wherever the slice happened to end rather than at the instruction after the OUT. The guest
+	// tolerates about 400 cycles of that and breaks by 517 - "Interrupts used to arrive late" in
+	// README.md has the sweep, and the clkint gate in p2k_cpuintrf.cpp is what existed to live with it.
+	//
+	// The flag keeps the common case to one test: only a zero-delay adjust() sets it
+	void run_due_timers()
+	{
+		if (!m_zero_pending) return;
+		m_zero_pending = false;
+		advance_to(m_time);
+	}
+	void note_zero_delay() { m_zero_pending = true; }
 
 private:
 	std::vector<std::unique_ptr<emu_timer>> m_timers;
 	attotime m_time;
+	bool m_zero_pending = false;
 };
 
 // ---------------------------------------------------------------- machine
@@ -621,7 +578,7 @@ public:
 	u32 debug_flags = 0;
 	int side_effects_disabled() const { return 0; }
 	void debug_break() {}
-	std::string describe_context() const { return std::string("p2k"); }
+	const std::string& describe_context() const { static const std::string s = std::string("p2k"); return s; }
 	u32 rand() { m_rand_seed = m_rand_seed * 1664525 + 1013904223; return m_rand_seed; }
 	attotime time() const { return m_scheduler.time(); }
 	void base_datetime(struct system_time &systime);
@@ -639,7 +596,7 @@ struct save_prepost_delegate { template <typename... T> save_prepost_delegate(T 
 struct p2k_symtable { template <typename... T> void add(T &&...) {} };
 struct p2k_debug_iface { p2k_symtable &symtable() { static p2k_symtable s; return s; } };
 
-// The device tree. Devices are created through device_type_impl::operator() and owned here.
+// The device tree. Devices are created through device_type_impl::operator() and owned here
 class machine_config final
 {
 public:
@@ -651,7 +608,7 @@ public:
 };
 
 // Input ports come from PinMAME, not from MAME's ioport system. The port definitions in the
-// imported devices are parsed away into empty functions.
+// imported devices are parsed away into empty functions
 class ioport_list;
 using ioport_constructor = void (*)(device_t &owner, ioport_list &portlist, std::string &errorbuf);
 
@@ -708,7 +665,7 @@ public:
 		: m_type(&type), m_owner(owner), m_clock(clock)
 	{
 		m_basetag = tag ? tag : "";
-		m_tag = (owner && *owner->tag()) ? std::string(owner->tag()) + ":" + m_basetag : m_basetag;
+		m_tag = (owner && *owner->tag()) ? std::string(owner->tag()) + ':' + m_basetag : m_basetag;
 	}
 	virtual ~device_t() = default;
 
@@ -725,10 +682,15 @@ public:
 	attotime clocks_to_attotime(u64 clocks) const
 	{ return m_clock ? attotime::from_ticks(clocks, double(m_clock)) : attotime::never; }
 
+	// Gated the way src/osdepend.h gates PinMAME's own logerror - "In PinMAME, log only in debug mode" - plus P2K_DEBUG!
+#if (!defined(PINMAME) || defined(MAME_DEBUG) || defined(_DEBUG) || P2K_DEBUG)
 	void logerror(const char *fmt, ...) const
 	{
 		va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
 	}
+#else
+	template <typename... T> ATTR_FORCE_INLINE void logerror(const char *, T &&...) const {}
+#endif
 
 	template <typename... T> void save_item(T &&...) const {}
 	template <typename... T> void save_pointer(T &&...) const {}
@@ -811,7 +773,7 @@ protected:
 
 // ---------------------------------------------------------------- nvram / time
 // MAME persists NVRAM through emu_file; here the interface exists so that devices with NVRAM
-// compile and initialise, and the machine glue reads/writes the contents itself.
+// compile and initialise, and the machine glue reads/writes the contents itself
 class emu_file final
 {
 public:
@@ -885,12 +847,12 @@ public:
 };
 
 
-// The device currently being configured; MAME resolves .set(FUNC(cls::method)) against it.
+// The device currently being configured; MAME resolves .set(FUNC(cls::method)) against it
 device_t *p2k_config_owner();
 
 // ---------------------------------------------------------------- devcb
 // MAME's callbacks are configured through .bind()/.set(...) in a machine config and then
-// resolved. Here a callback is just a std::function with a default value.
+// resolved. Here a callback is just a std::function with a default value
 template <typename Ret, typename... Args>
 class devcb_base
 {
@@ -920,7 +882,7 @@ public:
 	{ return m_func ? m_func(args...) : m_default; }
 
 	// MAME's accessors are declared `auto handler() { return m_cb.bind(); }`, so whatever bind()
-	// returns gets copied. It must therefore refer back to the callback, not be one.
+	// returns gets copied. It must therefore refer back to the callback, not be one
 	class binder final
 	{
 	public:
@@ -979,7 +941,7 @@ public:
 	void operator()(Args... args) const { if (m_func) m_func(args...); }
 
 	// MAME's accessors are declared `auto handler() { return m_cb.bind(); }`, so whatever bind()
-	// returns gets copied. It must therefore refer back to the callback, not be one.
+	// returns gets copied. It must therefore refer back to the callback, not be one
 	class binder final
 	{
 	public:
@@ -1014,7 +976,7 @@ using devcb_write_line = devcb_base<void, int>;
 using devcb_read_line  = devcb_base<int>;
 
 // Read/write callbacks carry an offset and a mask in MAME, but are frequently called without
-// them. These wrappers add the defaulted arguments the device sources expect.
+// them. These wrappers add the defaulted arguments the device sources expect
 template <typename DataType>
 class devcb_read_data final : public devcb_base<DataType, offs_t>
 {
@@ -1056,7 +1018,7 @@ using devcb_read32  = devcb_read_data<u32>;
 
 // ---------------------------------------------------------------- delegates
 // MAME's device_delegate: a callback bound to a device method, configured with .set(FUNC(...)).
-// Here it is a std::function plus the same set() shapes the device sources use.
+// Here it is a std::function plus the same set() shapes the device sources use
 template <typename Signature> class device_delegate;
 
 template <typename Ret, typename... Args>
@@ -1303,7 +1265,7 @@ private:
 // ---------------------------------------------------------------- state interface
 // A CPU register (or any other exported value) as registered with state_add(). MAME keeps a
 // pointer to the underlying variable; so does this, which is what lets a debugger read and
-// write registers without the CPU core knowing about it.
+// write registers without the CPU core knowing about it
 class device_state_entry final
 {
 public:
@@ -1331,7 +1293,7 @@ public:
 		u64 v = 0;
 		switch (m_size)
 		{
-			case 1: v = *reinterpret_cast<u8 *>(m_ptr); break;
+			case 1: v = *reinterpret_cast<u8  *>(m_ptr); break;
 			case 2: v = *reinterpret_cast<u16 *>(m_ptr); break;
 			case 4: v = *reinterpret_cast<u32 *>(m_ptr); break;
 			case 8: v = *reinterpret_cast<u64 *>(m_ptr); break;
@@ -1345,7 +1307,7 @@ public:
 		v &= m_mask;
 		switch (m_size)
 		{
-			case 1: *reinterpret_cast<u8 *>(m_ptr)  = u8(v);  break;
+			case 1: *reinterpret_cast<u8  *>(m_ptr) = u8(v);  break;
 			case 2: *reinterpret_cast<u16 *>(m_ptr) = u16(v); break;
 			case 4: *reinterpret_cast<u32 *>(m_ptr) = u32(v); break;
 			case 8: *reinterpret_cast<u64 *>(m_ptr) = v;      break;
@@ -1496,7 +1458,7 @@ inline device_memory_interface &device_t::memory() const
 	return *const_cast<device_memory_interface *>(dynamic_cast<const device_memory_interface *>(this));
 }
 
-inline void emu_timer::adjust(attotime start_delay, s32 param, attotime period)
+inline void emu_timer::adjust(const attotime& start_delay, s32 param, const attotime& period)
 {
 	m_param = param;
 	m_period = period;
@@ -1509,6 +1471,9 @@ inline void emu_timer::adjust(attotime start_delay, s32 param, attotime period)
 	{
 		m_expire = device_t::s_machine->time() + start_delay;
 		m_enabled = true;
+		// "now" - the caller wants this before the next instruction, not at the end of the slice.
+		// See device_scheduler::run_due_timers(), which is what actually delivers on that
+		if (start_delay.is_zero()) device_t::s_machine->scheduler().note_zero_delay();
 	}
 }
 
@@ -1521,7 +1486,7 @@ inline attotime emu_timer::remaining() const
 	return (m_expire > now) ? m_expire - now : attotime::zero;
 }
 
-inline void device_scheduler::advance_to(attotime target)
+inline void device_scheduler::advance_to(const attotime& target)
 {
 	for (;;)
 	{
@@ -1556,7 +1521,7 @@ inline device_t *device_t::subdevice_any(const char *tag) const
 {
 	extern machine_config *p2k_active_config;
 	if (!p2k_active_config) return nullptr;
-	std::string full = m_tag.empty() ? std::string(tag) : m_tag + ":" + tag;
+	std::string full = m_tag.empty() ? std::string(tag) : m_tag + ':' + tag;
 	return p2k_active_config->find(full);
 }
 
@@ -1582,7 +1547,6 @@ DeviceClass &device_type_impl<DeviceClass>::operator()(machine_config &config, c
 }
 
 // ---------------------------------------------------------------- misc helpers
-
 
 
 #include "divtlb.h"

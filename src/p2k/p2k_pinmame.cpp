@@ -19,30 +19,35 @@ extern "C" {
 // The ROMs arrive as PinMAME memory regions, which src/wpc/p2k.c passes in: the subsystem does not
 // know about PinMAME's ROM system and does not open files. Everything a machine needs is in its
 // ROM set, so a version is selected, audited and zipped exactly like any other game's
-void p2k_pinmame_start(const char *game,
-                       const unsigned char *prism, unsigned prismLen,
+void p2k_pinmame_start(const unsigned char *prism, unsigned prismLen,
                        const unsigned char *updates, unsigned updatesLen)
 {
 	g_machine = std::make_unique<p2k_state>();
 
-	// Which of the two games this is - the boot-ROM patch sits at a different address in each
-	const char *prefix = (game && *game) ? game : "rfm";
 
 	// A failure here means the ROM region is short or absent, which PinMAME's own audit should
 	// have caught first - but the machine would otherwise run with empty ROM banks and draw
 	// nothing, and a black screen with no message is indistinguishable from an emulation bug
-	if (!g_machine->set_prism_roms(prism, prismLen, prefix))
+	if (!g_machine->set_prism_roms(prism, prismLen))
 		fprintf(stderr, "[p2k] the MediaGX ROM region is missing or short (%u bytes, need %u) - "
 		                "this machine will show nothing\n", prismLen, 4u * 0x1000000u);
-	if (!g_machine->set_nvram_updates(updates, updatesLen))
-		fprintf(stderr, "[p2k] the update flash region is missing or short (%u bytes, need %u) - "
+#if P2K_DEBUG
+	// P2K_NO_UPDATE=1 hides a set's update flash, so a shipped game boots the way the prototypes do
+	if (getenv("P2K_NO_UPDATE")) { updates = nullptr; updatesLen = 0; }
+#endif
+	// No update region at all is a machine that has no update flash: the game is in the Prism ROMs
+	// and the loader starts the copy there. The flash stays erased, which is what such a board
+	// reads, and there is nothing to report. Present but short is the error case - that set is damaged
+	if (updatesLen != 0 && !g_machine->set_nvram_updates(updates, updatesLen))
+		fprintf(stderr, "[p2k] the update flash region is short (%u bytes, need %u) - "
 		                "the machine does not boot without it\n", updatesLen, 0x800000u);
 
-	// We run the MediaGX at 58.25 MHz for now(!), but should be at least 233MHz. That
-	// downclock is not free: the firmware programs the PIT as a rate generator with divisor 298,
-	// so a tick arrives every ~6400 CPU cycles if it would run at 20 MHz, and the operating system's tick handler
+	// We could run the MediaGX at 233MHz by now (but gameplay also ran okayish when it was e.g. 233/4), real life modders go even higher to prevent stutter.
+	// But it requires a pretty modern CPU, as its all single threaded, so we compromise on 233/3 ~= 77.7MHz.
+	// A potential downclock is not free: the firmware programs the PIT as a rate generator with divisor 298,
+	// so a tick arrives every e.g. ~6400 CPU cycles if it would run at 20 MHz, and the operating system's tick handler
 	// would not even fit in that
-	u32 cpu_hz = 233000000/4; //!! sync with p2k.c
+	u32 cpu_hz = 233000000/3; //!! sync with p2k.c
 #if P2K_DEBUG
 	// P2K_CPU_HZ raises it, which is how that was measured
 	if (const char *s = getenv("P2K_CPU_HZ")) { const long v = strtol(s, nullptr, 0); if (v > 0) cpu_hz = u32(v); }
@@ -55,17 +60,22 @@ void p2k_pinmame_stop(void) { g_machine.reset(); }
 
 // Persistent blocks: 0 = CMOS, 1 = PLX EEPROM, 2 = the update flash. PinMAME reads its NVRAM file
 // before the machine is built and writes it after the machine is gone, so the driver buffers the
-// bytes and these two move them in and out once it exists.
+// bytes and these two move them in and out once it exists
 void p2k_pinmame_nvram_set(int which, const unsigned char *data, unsigned size)
 {
 	size_t n = 0;
 	unsigned char *p = /*g_machine ?*/ g_machine->nvram_block_ptr(p2k_state::nvram_block(which), &n) /*: nullptr*/;
 	if (p && data) memcpy(p, data, size < n ? size : n);
+	// and back the other way: into the device, with the years slept through folded into register 9
+	if (which == P2K_NV_BLOCK_RTC) g_machine->rtc_restore();
 }
 
 unsigned p2k_pinmame_nvram_get(int which, unsigned char *data, unsigned size)
 {
 	size_t n = 0;
+	// The clock lives in the device, not in a buffer, so it is copied out and stamped with the host
+	// time first - that stamp is how the next start knows how long the machine was off
+	if (which == P2K_NV_BLOCK_RTC) g_machine->rtc_save();
 	const unsigned char *p = /*g_machine ?*/ g_machine->nvram_block_ptr(p2k_state::nvram_block(which), &n) /*: nullptr*/;
 	if (!p || !data) return 0;
 	if (size > n) size = unsigned(n);
@@ -83,10 +93,27 @@ void p2k_pinmame_write(offs_t address, UINT32 data, UINT32 mem_mask)
 	/*if (g_machine)*/ g_machine->mem_w(address, data, mem_mask);
 }
 
+// The power driver board's DIP switch byte, register 0x02. The machine reads it once during
+// startup and it selects the country, which is what the pricing tables key off - so a change
+// only takes effect on the next boot, exactly as moving the physical switches would
+// Put the host's date and time into the machine's real-time clock, on every start, so it shows real
+// time rather than the clock it had when it was last switched off. keep_year must be set for a
+// machine that has a clock of its own: the firmware treats the year register as a count of years to
+// add rather than a date, so handing it the host year again makes the displayed year climb. See p2k_state::clock_from_host()
+void p2k_pinmame_clock_from_host(int keep_year)
+{
+	if (g_machine) g_machine->clock_from_host(keep_year != 0);
+}
+
+void p2k_pinmame_set_dips(unsigned char dips)
+{
+	if (g_machine) g_machine->set_dips(dips);
+}
+
 // The pinball I/O. PinMAME's core model owns the switch matrix and wants the lamp and coil
 // state back; the driver board in the subsystem is the other end of that. Called from
 // src/wpc/p2k.c once per frame for now - fast enough for lamps, and the point at which a faster
-// sync would go if coils need it.
+// sync would go if coils need it
 void p2k_pinmame_push_switches(const unsigned char *matrix, unsigned count)
 {
 	/*if (g_machine)*/ g_machine->push_switches(matrix, count);
@@ -101,7 +128,7 @@ void p2k_pinmame_pull_outputs(unsigned char *lamps, unsigned lamp_columns, UINT3
 // buffer and its capacity; the return value is 1 on success, 0 if the machine
 // has no sane geometry yet. Pinball 2000 renders mirrored - the cabinet reflects the monitor
 // into the playfield - so this hands back what the hardware holds and leaves flipping to
-// whoever shows it.
+// whoever shows it
 unsigned p2k_pinmame_frame(UINT32 *dest, unsigned capacity, unsigned *width, unsigned *height, const unsigned fast_15bpp_path, unsigned *fast_15bpp_path_success)
 {
 	if (!g_machine || !dest || !width || !height) return 0;
