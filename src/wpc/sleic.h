@@ -75,7 +75,7 @@
      * Same key as Io Moon's drain, which is the opposite polarity on that machine: there \
      * the trough contacts mean "ball home" and the key RETURNS one, here they gate the \
      * ball-present check and the key TAKES one away */ \
-    COREPORT_BIT(     0x1000, "Ball out of trough (needs Balls>0)", KEYCODE_BACKSPACE) \
+    COREPORT_BIT(     0x1000, "Ball out of trough (needs Balls>0)", KEYCODE_BACKSPACE)
 
 /*-- Common Inports for SLEIC games whose DIP block has not been traced --*/
 #define SLEIC_COMPORTS \
@@ -131,93 +131,93 @@
   SLEIC_CABPORT \
     COREPORT_BIT(     0x1000, "Drain ball (needs Balls=3)", KEYCODE_BACKSPACE)
 
-/*-- Io Moon (SLEIC2) inports.  Same cabinet block plus the drain, but its DIP block is \
- * the real SW40. \
- * \
- * Read as PinMAME DIP bank 0 (core_getDip(0)); only SLEIC2 reads it, which is why it is \
- * a separate macro -- the sister machines' Z80 ROMs were never traced for SW40 and keep \
- * the plain S1..S8 above rather than showing labels they do not honour. \
- * \
- * The FUNCTIONS are the Io Moon service manual's, section 7.2.2.3: SW1 VDB solenoid \
- * watchdog, SW2-SW4 country code, SW5 "no balls dispensed", SW6 solenoid test, SW7 lamp \
- * test, SW8 board self-test.  Only SW2-SW4 is wired here, and only it is established \
- * from the ROM -- the manual gives no bit numbers.  Z80 command 0xF9 -> handler 2D9D \
- * reads port 0x04 and sends the low nibble back as 0xF0|nibble; the 80188 turns bits 1-3 \
- * of it into a country number 0..7 (D5CA3-D5CC2, seven-way table at D5D01). \
- * \
- * COUNTRY is what the manual calls the coin-value setting, and it is more than that: it \
- * picks the pricing preset (sub_D69CC -> one of eight, saved to NVRAM 0x1C4-0x1CF) AND \
- * the display LANGUAGE, because value 5 selects the Spanish string and menu-record \
- * tables at three sites (D3277 attract, D8048 pricing, DD406 menu records) while every \
- * other value gets the English ones. \
- * \
- * WHICH SWITCH IS THE LOW BIT is decided by the presets, not by the two obvious \
- * anchors.  Country 0 = the manual's UK row and country 5 = its Spain row are both \
- * INVARIANT under reversing SW2 and SW4 (000 and 101 are palindromes), so neither \
- * discriminates; so is Germany (010).  The rows that do are Italy, Netherlands, France \
- * and Belgium, and with SW2 as the LOW bit the presets read out of the emulator match \
- * the manual on six of the eight rows: \
- * \
- *   value  divisors (pulses)  credits      manual row     verdict \
- *     0        3 / 5 / 10      1 / 2 / 5   United Kingdom exact \
- *     1        2 / 5 / 10      1 / 3 / 7   France         DOES NOT MATCH (manual 3/5/10, 1/2/5) \
- *     2        1 / 2 / 5       1 / 3 / 8   Germany        exact \
- *     3        1 / 2 / 4       1 / 3 / 7   Italy          exact \
- *     4        2 / 5 / 10      1 / 3 / 7   Netherlands    exact \
- *     5      2 / 4 / 8 / 20  1 / 3 / 7 / 18 Spain         coins exact, 3rd credit 7 vs 8 \
- *     6        2 / 4 / 10      1 / 3 / 8   Belgium        DOES NOT MATCH (manual 2/5/10, 1/3/7) \
- *     7        1 / 2 / 4       1 / 3 / 6   Portugal       coins exact, 3rd credit 6 vs 7 \
- * \
- * Reverse SW2 and SW4 and three of those four discriminating rows break: value 3 would \
- * be Belgium (2/5/10 against the ROM's 1/2/4), value 4 France (3/5/10 against 2/5/10) \
- * and value 6 Italy (1/2/4 against 2/4/10), buying only Netherlands at value 1.  Six \
- * matching rows against three broken ones settles it: SW2 is the low bit, ON = 0, which \
- * is also the ordinary closed-switch convention and how the Z80 reads port 0x04 (no \
- * inversion).  Values 1 and 6 are labelled for their manual ROW; the coin values the \
- * ROM actually loads there are not the manual's, and value 1 is a duplicate of value 4. \
- * \
- * WHAT ONE COIN BUYS, per setting, because that is what the country switch is FOR.  The \
- * coin key inserts one coin of the smallest denomination the country accepts (SLEIC_CABPORT \
- * above, and iomoon_coin_update in sleic.c for why a key is a coin and not a pulse), so \
- * this column is what one press gives you on a fresh machine: \
- * \
- *   value  country          smallest coin    one press   two presses  three presses \
- *     0    United Kingdom   30p  (3 pulses)     1 credit    2           3 \
- *     1    France(ROM=NL)   2 pulses            1           2           3 \
- *     2    Germany          1 DM (1 pulse)      1           3           4 \
- *     3    Italy            500 L (1 pulse)     1           3           4 \
- *     4    Netherlands      1 Fl (2 pulses)     1           2           3 \
- *     5    Spain            50 pta (2 pulses)   1           3           4 \
- *     6    Belgium          2 pulses            1           3           4 \
- *     7    Portugal         50 Esc (1 pulse)    1           3           4 \
- * \
- * (No setting needs more than one press for the first credit, and none can: every preset's \
- * smallest coin is worth at least one credit -- that is what a smallest coin IS.  The \
- * later columns do not simply add up because the firmware prices the RUNNING PULSE TOTAL \
- * greedily, largest coin first, so two 1 DM coins are priced as one 2 DM coin and pay the \
- * 2 DM bonus -- that is the machine's own arithmetic (sub_DD03D), not a driver artefact. \
- * The larger denominations are not separate keys because they are not separate switches; \
- * see the coin comment in sleic.c.) \
- * \
- * DEFAULT is Netherlands -- country 4, SW2/SW3 ON and SW4 OFF, DIP value 0x0008 -- by \
- * OWNER PREFERENCE, and it is the setting the owner's own cabinet ran: guilders, one coin \
- * per game.  It is English text (country 5 is the only value that selects the Spanish \
- * tables, so every other value is English) and its preset is one of the six that match \
- * the service manual exactly -- 1 Fl/1, 2,5 Fl/3, 5 Fl/7 = 2/5/10 pulses for 1/3/7 \
- * credits -- with none of the France/Belgium coin-value discrepancies and no off-by-one \
- * credit like Spain's or Portugal's.  United Kingdom (0x0000) is equally exact and stays \
- * one click away; it is not the default only because the machine this driver is compared \
- * against is a Dutch one.  Verified end to end at the Netherlands default, from the DIP \
- * rather than an override: country byte 4, preset 2/5/10 and 1/3/7, one coin key \
- * press -> 1 credit, and START -> mode 3 -> song 1, with the DMD drawing the English \
- * ADJUSTMENT / SOUND-VIDEO / GAME / TECHNICAL menu. \
- * Note country 0 reaches its preset through two fall-through paths -- the country table \
- * at D5D01 is indexed from 2 so a nibble of 0 lands on D5CF8's "country 0", and \
- * sub_D69CC's bounds check sends 0 to the default preset sub_D6D36 -- which is by \
- * design, not an accident: D6D36 IS the UK column. \
- * Set Spain if the machine being compared against is a Spanish one; that is the market \
- * Io Moon was built for and the path the ROM exercises most (its own pricing routine \
- * sub_DCD9E and the only fourth coin value). */ \
+/*-- Io Moon (SLEIC2) inports.  Same cabinet block plus the drain, but its DIP block is
+ * the real SW40.
+ *
+ * Read as PinMAME DIP bank 0 (core_getDip(0)); only SLEIC2 reads it, which is why it is
+ * a separate macro -- the sister machines' Z80 ROMs were never traced for SW40 and keep
+ * the plain S1..S8 above rather than showing labels they do not honour.
+ *
+ * The FUNCTIONS are the Io Moon service manual's, section 7.2.2.3: SW1 VDB solenoid
+ * watchdog, SW2-SW4 country code, SW5 "no balls dispensed", SW6 solenoid test, SW7 lamp
+ * test, SW8 board self-test.  Only SW2-SW4 is wired here, and only it is established
+ * from the ROM -- the manual gives no bit numbers.  Z80 command 0xF9 -> handler 2D9D
+ * reads port 0x04 and sends the low nibble back as 0xF0|nibble; the 80188 turns bits 1-3
+ * of it into a country number 0..7 (D5CA3-D5CC2, seven-way table at D5D01).
+ *
+ * COUNTRY is what the manual calls the coin-value setting, and it is more than that: it
+ * picks the pricing preset (sub_D69CC -> one of eight, saved to NVRAM 0x1C4-0x1CF) AND
+ * the display LANGUAGE, because value 5 selects the Spanish string and menu-record
+ * tables at three sites (D3277 attract, D8048 pricing, DD406 menu records) while every
+ * other value gets the English ones.
+ *
+ * WHICH SWITCH IS THE LOW BIT is decided by the presets, not by the two obvious
+ * anchors.  Country 0 = the manual's UK row and country 5 = its Spain row are both
+ * INVARIANT under reversing SW2 and SW4 (000 and 101 are palindromes), so neither
+ * discriminates; so is Germany (010).  The rows that do are Italy, Netherlands, France
+ * and Belgium, and with SW2 as the LOW bit the presets read out of the emulator match
+ * the manual on six of the eight rows:
+ *
+ *   value  divisors (pulses)  credits      manual row     verdict
+ *     0        3 / 5 / 10      1 / 2 / 5   United Kingdom exact
+ *     1        2 / 5 / 10      1 / 3 / 7   France         DOES NOT MATCH (manual 3/5/10, 1/2/5)
+ *     2        1 / 2 / 5       1 / 3 / 8   Germany        exact
+ *     3        1 / 2 / 4       1 / 3 / 7   Italy          exact
+ *     4        2 / 5 / 10      1 / 3 / 7   Netherlands    exact
+ *     5      2 / 4 / 8 / 20  1 / 3 / 7 / 18 Spain         coins exact, 3rd credit 7 vs 8
+ *     6        2 / 4 / 10      1 / 3 / 8   Belgium        DOES NOT MATCH (manual 2/5/10, 1/3/7)
+ *     7        1 / 2 / 4       1 / 3 / 6   Portugal       coins exact, 3rd credit 6 vs 7
+ *
+ * Reverse SW2 and SW4 and three of those four discriminating rows break: value 3 would
+ * be Belgium (2/5/10 against the ROM's 1/2/4), value 4 France (3/5/10 against 2/5/10)
+ * and value 6 Italy (1/2/4 against 2/4/10), buying only Netherlands at value 1.  Six
+ * matching rows against three broken ones settles it: SW2 is the low bit, ON = 0, which
+ * is also the ordinary closed-switch convention and how the Z80 reads port 0x04 (no
+ * inversion).  Values 1 and 6 are labelled for their manual ROW; the coin values the
+ * ROM actually loads there are not the manual's, and value 1 is a duplicate of value 4.
+ *
+ * WHAT ONE COIN BUYS, per setting, because that is what the country switch is FOR.  The
+ * coin key inserts one coin of the smallest denomination the country accepts (SLEIC_CABPORT
+ * above, and iomoon_coin_update in sleic.c for why a key is a coin and not a pulse), so
+ * this column is what one press gives you on a fresh machine:
+ *
+ *   value  country          smallest coin    one press   two presses  three presses
+ *     0    United Kingdom   30p  (3 pulses)     1 credit    2           3
+ *     1    France(ROM=NL)   2 pulses            1           2           3
+ *     2    Germany          1 DM (1 pulse)      1           3           4
+ *     3    Italy            500 L (1 pulse)     1           3           4
+ *     4    Netherlands      1 Fl (2 pulses)     1           2           3
+ *     5    Spain            50 pta (2 pulses)   1           3           4
+ *     6    Belgium          2 pulses            1           3           4
+ *     7    Portugal         50 Esc (1 pulse)    1           3           4
+ *
+ * (No setting needs more than one press for the first credit, and none can: every preset's
+ * smallest coin is worth at least one credit -- that is what a smallest coin IS.  The
+ * later columns do not simply add up because the firmware prices the RUNNING PULSE TOTAL
+ * greedily, largest coin first, so two 1 DM coins are priced as one 2 DM coin and pay the
+ * 2 DM bonus -- that is the machine's own arithmetic (sub_DD03D), not a driver artefact.
+ * The larger denominations are not separate keys because they are not separate switches;
+ * see the coin comment in sleic.c.)
+ *
+ * DEFAULT is Netherlands -- country 4, SW2/SW3 ON and SW4 OFF, DIP value 0x0008 -- by
+ * OWNER PREFERENCE, and it is the setting the owner's own cabinet ran: guilders, one coin
+ * per game.  It is English text (country 5 is the only value that selects the Spanish
+ * tables, so every other value is English) and its preset is one of the six that match
+ * the service manual exactly -- 1 Fl/1, 2,5 Fl/3, 5 Fl/7 = 2/5/10 pulses for 1/3/7
+ * credits -- with none of the France/Belgium coin-value discrepancies and no off-by-one
+ * credit like Spain's or Portugal's.  United Kingdom (0x0000) is equally exact and stays
+ * one click away; it is not the default only because the machine this driver is compared
+ * against is a Dutch one.  Verified end to end at the Netherlands default, from the DIP
+ * rather than an override: country byte 4, preset 2/5/10 and 1/3/7, one coin key
+ * press -> 1 credit, and START -> mode 3 -> song 1, with the DMD drawing the English
+ * ADJUSTMENT / SOUND-VIDEO / GAME / TECHNICAL menu.
+ * Note country 0 reaches its preset through two fall-through paths -- the country table
+ * at D5D01 is indexed from 2 so a nibble of 0 lands on D5CF8's "country 0", and
+ * sub_D69CC's bounds check sends 0 to the default preset sub_D6D36 -- which is by
+ * design, not an accident: D6D36 IS the UK column.
+ * Set Spain if the machine being compared against is a Spanish one; that is the market
+ * Io Moon was built for and the path the ROM exercises most (its own pricing routine
+ * sub_DCD9E and the only fourth coin value) */
 #define SLEIC2_COMPORTS \
   SLEIC2_CABPORT \
   PORT_START /* 1 */ \
@@ -266,11 +266,11 @@
 
 #define SLEIC_INPUT_PORTS_END INPUT_PORTS_END
 
-#define SLEIC_COMINPORT       CORE_COREINPORT
+#define SLEIC_COMINPORT      CORE_COREINPORT
 
-#define SLEIC_LAMPSMOOTH      1 /* Smooth the lamps over this number of VBLANKS */
-#define SLEIC_DISPLAYSMOOTH   1 /* Smooth the display over this number of VBLANKS */
-#define SLEIC_SOLSMOOTH       1 /* Smooth the Solenoids over this number of VBLANKS */
+#define SLEIC_LAMPSMOOTH     1 /* Smooth the lamps over this number of VBLANKS */
+#define SLEIC_DISPLAYSMOOTH  1 /* Smooth the display over this number of VBLANKS */
+#define SLEIC_SOLSMOOTH      1 /* Smooth the Solenoids over this number of VBLANKS */
 
 /*-- Memory regions --*/
 #define SLEIC_MEMREG_CPU     REGION_CPU1
@@ -281,9 +281,9 @@
 #define SLEIC_MEMREG_GFX     REGION_USER2
 
 /* CPUs */
-#define SLEIC_MAIN_CPU    0
-#define SLEIC_IO_CPU      1
-#define SLEIC_DISPLAY_CPU 2
+#define SLEIC_MAIN_CPU       0
+#define SLEIC_IO_CPU         1
+#define SLEIC_DISPLAY_CPU    2
 
 #define SLEIC_ROMSTART4(name, n1, chk1, n2, chk2, n3, chk3, n4, chk4) \
 ROM_START(name) \

@@ -105,7 +105,7 @@ Arena (rev. 2) (most likely official, but unreleased so far, makes it the newest
 Atlantis (rev. 3 Tournament MOD v3931)
 Bad Cats LF-1 (French)
 Bad Cats (The Cat's Meow) (MOD 1.2 & 1.3)
-Bike Race (V4.1) (not working, maybe bad/incomplete dump)
+Bike Race (V4.1)
 Corvette LA-2
 Cue Ball Wizard (Spanish / Vifico license)
 Diner LA-4 (Fixed Right Ramp MOD)
