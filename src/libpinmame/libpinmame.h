@@ -24,6 +24,12 @@
 #define PINMAME_MAX_MECHSW 20
 #define PINMAME_ACCUMULATOR_SAMPLES 8192 // from mixer.c
 
+#define UINT32 uint32_t
+#define UINT8  uint8_t
+
+#include "plugins/MsgPlugin.h"
+
+
 typedef enum {
 	PINMAME_LOG_LEVEL_DEBUG = 0,
 	PINMAME_LOG_LEVEL_INFO = 1,
@@ -52,11 +58,6 @@ typedef enum {
 	PINMAME_DMD_MODE_BRIGHTNESS = 0,
 	PINMAME_DMD_MODE_RAW = 1
 } PINMAME_DMD_MODE;
-
-typedef enum {
-	PINMAME_SOUND_MODE_DEFAULT = 0,
-	PINMAME_SOUND_MODE_ALTSOUND = 1
-} PINMAME_SOUND_MODE;
 
 typedef enum {
 	PINMAME_AUDIO_FORMAT_INT16 = 0,
@@ -321,7 +322,9 @@ typedef struct {
 	int32_t length;
 	int32_t width;
 	int32_t height;
-	int32_t depth;
+	int32_t depth; // How the frame handed to cb_OnDisplayUpdated is packed: 2 or 4 bits per dot for a DMD,
+	               // and for a VIDEO display either 24 (three bytes per pixel, r,g,b) or 16 (one uint16_t
+	               // per pixel, 5.6.5, red in the high bits)
 } PinmameDisplayLayout;
 
 typedef struct {
@@ -446,8 +449,6 @@ PINMAMEAPI int PinmameGetHandleMechanics();
 PINMAMEAPI void PinmameSetHandleMechanics(const int handleMechanics);
 PINMAMEAPI PINMAME_DMD_MODE PinmameGetDmdMode();
 PINMAMEAPI void PinmameSetDmdMode(const PINMAME_DMD_MODE dmdMode);
-PINMAMEAPI PINMAME_SOUND_MODE PinmameGetSoundMode();
-PINMAMEAPI void PinmameSetSoundMode(const PINMAME_SOUND_MODE soundMode);
 PINMAMEAPI PINMAME_STATUS PinmameRun(const char* const p_name);
 PINMAMEAPI int PinmameIsRunning();
 PINMAMEAPI PINMAME_STATUS PinmamePause(const int pause);
@@ -485,6 +486,13 @@ PINMAMEAPI int PinmameGetMaxNVRAM();
 PINMAMEAPI int PinmameGetNVRAM(PinmameNVRAMState* const p_nvramStates);
 PINMAMEAPI int PinmameGetChangedNVRAM(PinmameNVRAMState* const p_nvramStates);
 PINMAMEAPI int PinmameReadMainCPUByte(uint32_t address, uint8_t* const p_value);
+PINMAMEAPI int PinmameReadMainCPUMemory(uint32_t address, uint8_t* const p_buffer, int size);
 PINMAMEAPI const uint8_t* PinmameGetRawMemoryRegion(const int region);
 PINMAMEAPI size_t PinmameGetRawMemoryRegionLength(const int region);
 PINMAMEAPI void PinmameSetUserData(void* const p_userData);
+
+// If defined, libPinMame will implement the core controller messages for display, input & output state queries
+PINMAMEAPI void PinmameSetMsgAPI(MsgPluginAPI* msgPluginAPI, unsigned int endpointId);
+
+// Provide a 'Pinball Memory Maps' (see https://github.com/tomlogic/pinmame-nvram-maps) to expose additional internal game states
+PINMAMEAPI void PinmameSetMemMap(uint8_t* platform, size_t platformSize, uint8_t* game, size_t gameSize);

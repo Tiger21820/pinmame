@@ -2015,7 +2015,7 @@ static VIDEO_UPDATE(core_status) {
 
   {
     BMTYPE **line = &lines[locals.firstSimRow + startRow];
-    if (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL | CORE_MODOUT_FORCE_ON))
+    if (coreGlobals.nSolenoids && (options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL | CORE_MODOUT_FORCE_ON)))
     {
       float state[CORE_MODOUT_SOL_MAX];
       core_getAllPhysicSols(state);
@@ -2544,7 +2544,7 @@ static MACHINE_INIT(core) {
               parent_layout = layout + 1;
               layout->index = -1;
               layout = layout->importedLayout - 1;
-              break;
+              continue; // trailing index reset would access importedLayout[-1]
 
            case CORE_VIDEO:
               assert(layout->importedLayout == NULL); // Not an import
@@ -3276,6 +3276,15 @@ void core_set_pwm_output_types(int startIndex, int count, int* outputTypes)
 {
    for (int i = 0; i < count; i++)
       core_set_pwm_output_type(startIndex + i, 1, outputTypes[i]);
+}
+
+int core_get_pwm_output_type(int index)
+{
+   if (coreGlobals.physicOutputState[index].integrator == &core_update_pwm_output_bulb)
+      return 1;
+   if (coreGlobals.physicOutputState[index].integrator == &core_update_pwm_output_led)
+      return 1;
+   return 0;
 }
 
 // Perform emulation of the requested physical outputs from the stored PWM digital output states

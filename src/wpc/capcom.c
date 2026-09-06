@@ -741,7 +741,7 @@ static MACHINE_INIT(cc) {
     core_set_pwm_output_type(CORE_MODOUT_SOL0 + 21 - 1, 6, CORE_MODOUT_BULB_89_20V_DC_WPC);
   }
   else if (strncasecmp(gn, "bsv", 3) == 0) { // Breakshot
-    core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC); // Center pocket Flasher
+    core_set_pwm_output_type(CORE_MODOUT_SOL0 + 28 - 1, 1, CORE_MODOUT_BULB_89_20V_DC_WPC); // Center pocket Flasher
     // core_set_pwm_output_type(CORE_MODOUT_SOL0 + 27 - 1, 5, CORE_MODOUT_BULB_89_20V_DC_WPC); // Plunger Flasher (appears in doc but was not kept in production)
   }
   else if (strncasecmp(gn, "ffv", 3) == 0) { // Flipper Football
@@ -758,8 +758,8 @@ static MACHINE_INIT(cc) {
   // Defaults to 2 state legacy integrator for better backward compatibility
   if ((options.usemodsol & (CORE_MODOUT_ENABLE_PHYSOUT_SOLENOIDS | CORE_MODOUT_ENABLE_MODSOL)) == 0)
      for (int i = 0; i < coreGlobals.nSolenoids; i++)
-        if (coreGlobals.physicOutputState[i].type != CORE_MODOUT_SOL_2_STATE)
-           core_set_pwm_output_type(CORE_MODOUT_SOL0, 1, CORE_MODOUT_LEGACY_SOL_2_STATE);
+        if (coreGlobals.physicOutputState[CORE_MODOUT_SOL0 + i].type != CORE_MODOUT_SOL_2_STATE)
+           core_set_pwm_output_type(CORE_MODOUT_SOL0 + i, 1, CORE_MODOUT_LEGACY_SOL_2_STATE);
   if ((options.usemodsol & CORE_MODOUT_ENABLE_PHYSOUT_LAMPS) == 0)
      core_set_pwm_output_type(CORE_MODOUT_LAMP0, 80 /*coreGlobals.nLamps*/, CORE_MODOUT_LEGACY_SOL_2_STATE);
   if ((options.usemodsol & CORE_MODOUT_ENABLE_PHYSOUT_GI) == 0)

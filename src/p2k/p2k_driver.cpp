@@ -885,26 +885,44 @@ void p2k_state::push_switches(const u8 *matrix, unsigned count)
 	if (!matrix) return;
 	if (count > sizeof(m_sw_matrix)) count = sizeof(m_sw_matrix);
 	for (unsigned i = 0; i < count; i++) m_sw_matrix[i] = matrix[i];
-
-	// The board's own numbering, read out of the game's switch table (see src/p2k/README.md):
-	// switch number = 100 + (column-1)*8 + (row-1), with columns 1-9 the playfield matrix,
-	// column 10 the coin door's diagnostic buttons and column 11 the cabinet. Those two land in
-	// PinMAME's columns of the same number; the coin inputs use PinMAME's coin door column 0
-	m_coin_switches = m_sw_matrix[0];
-	m_diag_switches = m_sw_matrix[10];
-	m_cabinet_switches = m_sw_matrix[11];
 }
 
-void p2k_state::pull_outputs(u8 *lamps, unsigned lamp_columns, u32 *solenoids, u32 *solenoids2) const
+// The switch matrix, by column, as the read side wants it: the caller's own array where one was
+// handed over, so the game sees a switch at the moment it strobes for it, otherwise the pushed
+// copy. wpc.c and se.c index coreGlobals.swMatrix from their read handlers in the same way.
+//
+// The board's own numbering, read out of the game's switch table (see src/p2k/README.md):
+// switch number = 100 + (column-1)*8 + (row-1), with columns 1-9 the playfield matrix,
+// column 10 the coin door's diagnostic buttons and column 11 the cabinet. Those two land in
+// PinMAME's columns of the same number; the coin inputs use PinMAME's coin door column 0
+u8 p2k_state::sw_column(unsigned col) const
 {
+	col &= 0xf;
+	return m_sw_live ? m_sw_live[col] : m_sw_matrix[col];
+}
+
+// Hand over everything the board did since the last call and start a fresh window.
+//
+// Lamps clear to nothing, so a column the game stops strobing goes dark, as the bulb does.
+// Solenoids reseed with the current level, so an output still held reads on in the next window and
+// only a released one falls away. That asymmetry is se.c:182-193, and it is what turns a chopped
+// burst into the single "on" it physically is without inventing one that was never driven
+void p2k_state::pull_outputs(u8 * const lamps, unsigned lamp_columns, u32 * const solenoids, u32 * const solenoids2, u32 * const solNow, u32 * const sol2Now)
+{
+	if (solNow ) *solNow  = m_solenoids;
+	if (sol2Now) *sol2Now = m_solenoids2;
 	if (lamps)
 	{
-		if (lamp_columns > sizeof(m_lamp_matrix)) lamp_columns = sizeof(m_lamp_matrix);
-		for (unsigned i = 0; i < lamp_columns; i++) lamps[i] = m_lamp_matrix[i];
+		if (lamp_columns > sizeof(m_lamp_acc)) lamp_columns = sizeof(m_lamp_acc);
+		for (unsigned i = 0; i < lamp_columns; i++) { lamps[i] = m_lamp_acc[i]; m_lamp_acc[i] = 0; }
 	}
-	if (solenoids ) *solenoids  = m_solenoids;
-	if (solenoids2) *solenoids2 = m_solenoids2;
+	if (solenoids ) { *solenoids  = m_sol_acc;  m_sol_acc  = m_solenoids;  }
+	if (solenoids2) { *solenoids2 = m_sol2_acc; m_sol2_acc = m_solenoids2; }
 }
+
+// Expand a 5 or 6 bit colour channel to 8 bits, replicating the high bits into the low ones so that the channel maximum maps to 255
+static inline u8 expand5to8(const u32 v) { return u8((v << 3) | (v >> 2)); }
+static inline u8 expand6to8(const u32 v) { return u8((v << 2) | (v >> 4)); }
 
 // ---------------------------------------------------------------- framebuffer to a file
 // P2K_PPM=<path> writes the MediaGX framebuffer once, after P2K_PPM_AT cycles (20 emulated
@@ -989,15 +1007,15 @@ bool p2k_state::frame_rgb(u32* const __restrict dest, unsigned capacity, unsigne
 				const u16 c = (off + 1 < room) ? fb16[off_fb] : 0;
 				if ((cfg & 2) == 0)                             // RGB565
 				{
-					r = u8(((c >> 11) & 0x1f) << 3);
-					g = u8(((c >> 5) & 0x3f) << 2);
+					r = expand5to8((c >> 11) & 0x1f);
+					g = expand6to8((c >> 5) & 0x3f);
 				}
 				else                                            // RGB555
 				{
-					r = u8(((c >> 10) & 0x1f) << 3);
-					g = u8(((c >> 5) & 0x1f) << 3);
+					r = expand5to8((c >> 10) & 0x1f);
+					g = expand5to8((c >> 5) & 0x1f);
 				}
-				b = u8((c & 0x1f) << 3);
+				b = expand5to8(c & 0x1f);
 			}
 			dest[offs] = (u32(r) << 16) | (u32(g) << 8) | b;
 		}
@@ -1519,7 +1537,7 @@ void p2k_state::do_gfx_pipeline()
 	// destination data, all ones into the raster unit; 100/101 take it from the frame buffer, which
 	// is not a colour key and has not been seen with C6h.
 	//
-	// Not modelled: §4.4.1 stages each source scan line into a BLT buffer as the hardware blits, so
+	// Not modelled: 4.4.1 stages each source scan line into a BLT buffer as the hardware blits, so
 	// Buffer 0 would hold the last line copied. This reads VRAM directly, and nothing reads it back
 	const unsigned blt_rd = (m_gx_pipeline_reg[GP_BLT_MODE] >> 2) & 7u;
 	const u32 key_base = (blt_rd == 2) ? m_maincpu->cpu_access_reg(mediagx_device::L1_BB0_BASE)
@@ -2352,8 +2370,8 @@ u8 p2k_state::pdb_reg_r() const
 {
 	switch (m_pdb_index)
 	{
-		case 0x00: return m_coin_switches;
-		case 0x01: return m_cabinet_switches;
+		case 0x00: return sw_column(0);
+		case 0x01: return sw_column(11);
 		// The power driver board's DIP switches, read once during startup: they select the country,
 		// which is what the pricing tables key off (the changelogs talk about "the country dipswitch
 		// setting"). Answers with whatever the user set, through core_getDip(0) and p2k_pinmame_set_dips(), and 1 is still
@@ -2370,7 +2388,7 @@ u8 p2k_state::pdb_reg_r() const
 		// about the country dipswitch setting, so switches is what this is. Encore agrees with the
 		// 0x00 for the fuses below, which the service menu fuse test confirms is the healthy reading
 		case 0x02: return m_dip_switches;
-		case 0x03: return m_diag_switches;
+		case 0x03: return sw_column(10);
 		case 0x04:
 		{
 			// The switch row for whichever column is being strobed. Measured: the column
@@ -2379,7 +2397,7 @@ u8 p2k_state::pdb_reg_r() const
 			// read as active low here before, which shifted every column by one)
 			for (unsigned c = 0; c < 8; c++)
 				if (m_switch_column & (1u << c))
-					return m_sw_matrix[(c + 1) & 0xf];          // PinMAME numbers columns from 1
+					return sw_column(c + 1); // PinMAME numbers columns from 1
 			return 0x00;
 		}
 		// These four return index+1, which was a placeholder rather than a model of anything.
@@ -2448,6 +2466,7 @@ void p2k_state::lpt_w(offs_t offset, u8 data)
 #endif
 
 	// a write to the selected I/O register
+	const u32 solWas = m_solenoids, sol2Was = m_solenoids2;
 	switch (m_pdb_index)
 	{
 		case 0x05: m_switch_column = data; break; // switch column strobe, one-hot
@@ -2457,14 +2476,18 @@ void p2k_state::lpt_w(offs_t offset, u8 data)
 			// Lamp column strobe. The board drives one column at a time and has two row banks
 			// of eight (index 6 and 7), so a column carries sixteen lamps; PinMAME's matrix is
 			// eight bits per column, so each driven column becomes two of them - bank A at 2c,
-			// bank B at 2c+1. Eight columns therefore occupy sixteen of PinMAME's
-			m_lamp_col = data;
+			// bank B at 2c+1. Eight columns therefore occupy sixteen of PinMAME's.
+			//
+			// ORed rather than stored: the board blanks the strobe to 0x00 between columns, and a
+			// column that is being dimmed is simply strobed less often, so the window is what says whether a bulb was lit
 			for (unsigned c = 0; c < 8; c++)
 				if (data & (1u << c))
 				{
-					m_lamp_matrix[c * 2 + 0] = m_lamp_row_a;
-					m_lamp_matrix[c * 2 + 1] = m_lamp_row_b;
+					m_lamp_acc[c * 2 + 0] |= m_lamp_row_a;
+					m_lamp_acc[c * 2 + 1] |= m_lamp_row_b;
 				}
+			// Unconditionally, blanking writes included: see set_lamp_notify()
+			if (m_lamp_notify) m_lamp_notify(data, m_lamp_row_a, m_lamp_row_b);
 			break;
 		// Measured in the game's own coil test, which cycles the drivers in order and names each
 		// one on screen: the driver numbering runs 0x0b, 0x0a, 0x09, 0x0d, 0x0c, eight per
@@ -2492,6 +2515,18 @@ void p2k_state::lpt_w(offs_t offset, u8 data)
 		case 0x0e: m_solenoids2 = (m_solenoids2 & ~0x0000ff00u) | (u32(data) << 8); break;// drivers 41-48
 		default: break; // diagnostics: later
 	}
+
+	// The live edge, for the PWM integrator: only on a real change, because that is what an edge is
+	// and because the integrator keeps a bounded history of them
+	if (m_sol_notify && (m_solenoids != solWas || m_solenoids2 != sol2Was))
+		m_sol_notify(m_solenoids, m_solenoids2);
+
+	// Every driver level the registers ever hold, ORed up for pull_outputs(). Here rather than in
+	// the six cases above, and without asking which register was written: a solenoid register only
+	// changes in one of those cases, so sampling after any board write catches each level at the
+	// moment it is established, and re-ORing an unchanged one costs nothing
+	m_sol_acc |= m_solenoids;
+	m_sol2_acc |= m_solenoids2;
 }
 
 u8 p2k_state::port_r(offs_t port)
@@ -2545,7 +2580,7 @@ u8 p2k_state::port_read(offs_t port)
 	// unmapped (reads return 0xff) lets it continue. This used to say the missing piece was SMM.
 	// It is not: the SMM region at 0x40400000 is never read or written by any set, and the only
 	// SMI sources the databook gives the bus interface unit are the VGA I/O traps in BC_XMAP_1
-	// bits 13-15, which no set sets (§4.2.3, and P2K_BIUWATCH shows the XMAP registers untouched).
+	// bits 13-15, which no set sets (4.2.3, and P2K_BIUWATCH shows the XMAP registers untouched).
 	// What is behind these registers is GX_BASE itself, among the rest of the configuration - so
 	// answering them wrongly can move the whole register aperture out from under the driver
 	if (port >= 0x002e && port <= 0x002f)

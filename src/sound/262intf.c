@@ -113,6 +113,7 @@ static void YMF262Write_ymfm(int n, int a, int v)
 			break;
 		case 1: /* data port (A1 ignored) */
 		case 3:
+			stream_update(stream_262[n], 0);
 			vgm_write(vgm_idx_262[n], vgm_addressa_262[n] >> 8, vgm_addressa_262[n] & 0xFF, v);
 			ymfm_opl_write(chip_262[n], a & 3, v);
 			break;

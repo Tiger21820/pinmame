@@ -554,6 +554,9 @@ set(PINMAME_SOURCES
    src/wpc/playgames.c
    src/wpc/playsnd.c
    src/wpc/regama.c
+   src/wpc/rfranco.c
+   src/wpc/rfranco.h
+   src/wpc/rfrancogames.c
    src/wpc/rotation.c
    src/wpc/rowamet.c
    src/wpc/s3games.c
@@ -789,7 +792,11 @@ if(BUILD_SHARED)
       LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
    )
 
-   install(FILES src/libpinmame/libpinmame.h DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
+   install(FILES
+      src/libpinmame/libpinmame.h
+      src/libpinmame/PinMAMEPlugin.h
+      DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pinmame
+   )
 
    if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
       add_executable(pinmame_test
@@ -819,7 +826,11 @@ if(BUILD_STATIC)
       LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
    )
 
-   install(FILES src/libpinmame/libpinmame.h DESTINATION ${CMAKE_INSTALL_PREFIX}/include)
+   install(FILES
+      src/libpinmame/libpinmame.h
+      src/libpinmame/PinMAMEPlugin.h
+      DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pinmame
+   )
 
    if(PLATFORM STREQUAL "win" OR PLATFORM STREQUAL "win-mingw" OR PLATFORM STREQUAL "macos" OR PLATFORM STREQUAL "linux")
       add_executable(pinmame_test_s

@@ -107,6 +107,12 @@ static void YM3812Write_ymfm(int n, int a, int v)
 {
 	if (a & 1) /* data port */
 	{
+		/* Render the stream up to this write's CPU time before applying it.  Without it, every
+		 * write of a video frame lands on the chip at one instant.  ymfm detects a
+		 * key-on/key-off EDGE only per generated sample (ymfm_fm.ipp clock_keystate),
+		 * so e.g. a key-off immediately followed by a key-on inside the same frame collapses to
+		 * key 1->1: no attack, the old note just sustains */
+		stream_update(stream_3812[n], 0);
 		vgm_write(vgm_idx_3812[n], 0x00, lastreg_3812[n], v);
 		ymfm_opl_write(chip_3812[n], 1, v);
 	}
@@ -324,6 +330,7 @@ static void YM3526Write_ymfm(int n, int a, int v)
 {
 	if (a & 1) /* data port */
 	{
+		stream_update(stream_3526[n], 0);
 		vgm_write(vgm_idx_3526[n], 0x00, lastreg_3526[n], v);
 		ymfm_opl_write(chip_3526[n], 1, v);
 	}

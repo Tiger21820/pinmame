@@ -31,6 +31,8 @@ Get rid of BASS external dependency (used for internal AltSound mode 1 support) 
 
 *** CORE/CPU ***
 Added Pinball 2000 emulation. It works in principle, but the CPU is clocked way too low (0.33x) for performance reasons (for now)! Still, it seems to work reasonably well, most likely as the graphics/video part is not emulated cycle-accurate and thus much faster than the clock rate implies.
+Added Recreativos Franco emulation (Super Star), including improved i8085 emulation
+Fixed and extended Sleic emulation (Bike Race, Io Moon, Pin-Ball), including some i86 fixes
 Fixed a potential small problem with Bally VideoPins sound emulation
 Added physical/PWM DMD support to Capcom games (potentially leading to more brightness levels being displayed if the CPU triggers it)
 Added physical/PWM (dimmed) segment support to System 11 games
@@ -44,12 +46,14 @@ Added physical/PWM lamps and/or solenoids support to some GTS80 games (Amazon Hu
 Added physical/PWM (dimmed) segment support to GTS80A games
 Added physical/PWM support to Star Wars Trilogy and Titanic
 Added physical/PWM support to games employing mini-DMDs and the like
+Fixed Breakshots invalid PWM flasher definition
 Fixed some potential general solenoid issues with physical/PWM
 Improved physical/PWM bulb integration
 Improved BY6803 emulation, and add dimmed segments support, and bright physical/PWM lights
 Improved Alvin G. first generation DMD simulation
 In general, (almost) all DMD/mini-DMD outputs have been moved to the proper physical/PWM pipeline, allowing for more subtle effects
 Implemented memory protect logic/coin-door-switch on Sega/Stern WhiteStar games: Previously, the coin door was always considered to be open, but the coin door message doesn't get displayed if the door is already open on boot. It will only display after the door has been closed and then reopened.
+Rewired Striker Xtreme, Playboy and Sharkey's Shootout to use the J2 auxiliary-data latch of 520-5192 (fixes e.g. center and outlane pegs stuck in up position for Sharkey's)
 Fixed trolls in Medieval Madness
 Improved sound for Metal Man, and a bit for Jolly Park and Verne's World (in general, slightly more authentic MSM5205 sound)
 Slightly improved YM262 sound for Sir Lancelot
@@ -57,26 +61,34 @@ Fixed sound problems if a OKI6295 game is used after a OKI6376 game (e.g. GTS3 a
 Fixed VGM recording for machines using OKI6295 sound
 Added VGM recording for machines using BSMT2000 sound
 Fixed flipped left/right channel for Alvin G. BSMT2000 sound (must have regressed at some point when extending the BSMT2000 core)
-Fixed noise filter/pass in the Votrax/SC01 emulation (some GTS80(A)s and Taitos)
+Fixed noise filter/pass and injection filter/pass in the Votrax/SC01 emulation (some GTS80(A)s and Taitos)
 Used YMFM's OPL cores (OPL/YM3526, OPL2/YM3812, OPL3/YMF262) for a more accurate emulation (Tabart; AlvinG, JVH, Mephisto, Sleic; Lancelot)
 Credits saved, and more lamps found on Stargame games Space Ship and White Force
 Replaced existing arm7/AT91 JIT compiler with a new asmjit-library based one, which enables JIT speedups on all x86 and x64 compiles/platforms (incl. Linux and macOS), and some arm 64bit compiles/platforms (incl. Android, Windows, macOS and 64bit raspberries)
  in addition, it is a bit more faithful than the old JIT, and also a bit faster on the average
+Slightly improve Splin (Belgium) bingo sets (via i86 fixes)
+Caveman should now work consistently (also via i86 fixes)
 
 *** ROM SUPPORT *** Thanks to Tom Collins/Scorbit, Paul Swan, Dieter Werner, Victor Fernandez, Jordi Beltran, ipdb.org, Billc479, Scott Charles, inkochnito, frisbez, Chad Hendrickson, idealjoker, ingo333, RedBall, Quench, slochar, Jesus Carballo, Rockman i uri666arcade de l'associació ARCADE (Recreativas.org), myPinballs, hemtoni
 New:
 IDSA: Fantastic Car
-WMS:  Revenge From Mars 1.60, 1.50, 1.40, 1.20, 0.80, 0.1
-      Star Wars Episode I 1.50, 1.40, 1.30, 0.40
+Recreativos Franco: Super Star rev. 1, 2, 3, 4
+WMS:  Revenge From Mars 1.60, 1.50, 1.40, 1.30, 1.20 (official updates)
+                        0.87, 0.86, 0.85, 0.84, 0.71, 0.70 (prototype updates)
+                        0.80, 0.1 (factory images on Prism ROMs, rev. 2(?) and rev. 1 cards)
+      Star Wars Episode I 1.50, 1.40, 1.30, 1.20, 1.10, 1.00 (official updates)
+                          0.40 (factory image on Prism ROMs)
 
 Kinda new:
 Baywatch 4.02 (unofficial MOD)
 Teenage Mutant Ninja Turtles 2.00 (unofficial MOD)
-Revenge From Mars 2.60, 2.50, 2.24 (r3 & r2), 2.23, 2.22, 2.21, 2.20, 2.10, 2.00 (unofficial MODs)
-                  1.95, 1.91, 1.90 (unofficial MODs)
-                  1.80 (kinda official MOD by Tom Uban, for the 2006 tournament server)
-Star Wars Episode I 2.10, 2.01, 2.00 (unofficial MODs)
-                    1.66 (unofficial MODs)
+Revenge From Mars 2.60, 2.50, 2.24 (r3, r2 & r1), 2.23, 2.22, 2.21, 2.20, 2.10 (r4, r3, r2 & r1), 2.00 (unofficial MODs by myPinballs)
+                  1.95 (r2 & r1), 1.91, 1.90 (r3, r2 & r1) (unofficial MODs by hemtoni)
+                  1.21 (unofficial MOD, built in 2016?!)
+                  1.80, 1.70 (kinda official MODs by Tom Uban, for the 2006 tournament server)
+Star Wars Episode I 2.10, 2.01, 2.00m (unofficial MODs by myPinballs)
+                    2.00h, 1.66 (r2 & r1), 1.65 (r2 & r1) (unofficial MODs by hemtoni, a separate line from myPinballs' 2.x above)
+                    1.60 (kinda official MOD by Tom Uban, released alongside RFM 1.80)
 
 Correct Dumps:
 DE: Batman 1.06 (just using correct name for the display rom (1.02 instead of 1.06))
@@ -93,6 +105,7 @@ Arena (rev. 2) (most likely official, but unreleased so far, makes it the newest
 Atlantis (rev. 3 Tournament MOD v3931)
 Bad Cats LF-1 (French)
 Bad Cats (The Cat's Meow) (MOD 1.2 & 1.3)
+Bike Race (V4.1)
 Corvette LA-2
 Cue Ball Wizard (Spanish / Vifico license)
 Diner LA-4 (Fixed Right Ramp MOD)
@@ -101,6 +114,7 @@ Funhouse 9.07H (Ballsaver MOD), 9.05H + (Ballsaver MOD) (both are independently 
 Gorgar L-2 (most likely official, but unreleased so far, makes it the newest version available)
 High Speed G-4 (aka German PROTO4), L-1 (but coming from a Unidesa / Cirsa licensed board)
 Hurricane D-2 LED Ghost Fix + Ball Saver MOD
+Io Moon (earlier ROM revision), (PRESS START tournament MOD)
 Mata Hari (Free Play and MODified rules, 6 and 7 digit versions (latter requires DIP 19 on))
 Maverick 4.04 (German, Display 4.00)
 Monte Carlo (German) (most likely older revision than existing one, see above)
@@ -110,7 +124,7 @@ Police Force LX-5a & LX-5pi(Post INDISC) (MOD)
 Rollergames TA-2 (LA-2C competition MOD based Tournament Edition)
 Rolling Stones V21 (unreleased so far, makes it the newest version available)
 Soccer Kings (alternate set 2)
-STTNG LX-9 (MOD) (using the special L-1 sound roms, note that the special callouts can be turned off completely within the game menu)
+STTNG LX-9 (MOD) (using the special L-1 sound roms, note that the special callouts can be turned off completely within the game menu), LA-7
 Super Mario Bros. (Spanish / Vifico license) (rev.1 and (most likely) rev.2)
 Surf 'n Safari (Tournament MOD)
 Swords of Fury (Richrom/Lionman MOD V1, with and without swords sounds)
