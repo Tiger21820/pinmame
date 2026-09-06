@@ -650,6 +650,7 @@ static void sleic_debug_switches(int troughCol, UINT8 troughDefault) {
   static int frame = 0;
   const char *e, *col, *bit;
   frame++;
+  if (getenv("SLEIC_TRACE_SND") && (frame % 60) == 0) fprintf(stderr, "[frame %d]\n", frame);
 
   if ((e = getenv("SLEIC_INJECT_CAB")))
     coreGlobals.swMatrix[9] |= (UINT8)strtol(e, NULL, 0);
@@ -743,20 +744,19 @@ static WRITE_HANDLER(pic_w) {
   logerror("PIC W(%03x->%2x) = %02x\n", offset, offset>>7, data);
 }
 
-/* PACS peripheral chip-select block at segment A000h (base 0xA0000,
- * 7 selects PCS0-PCS6 on 0x80 boundaries):
- *   0xA0000 PCS0  DMD control reg 1  AND the OKI /OKCS strobe (bit 5)
- *   0xA0080 PCS1  DMD control reg 2
- *   0xA0200 PCS4  DMD mode; bit 3 rising edge = swap-buffer / frame strobe
- *   0xA0280 PCS5  YM3812 register/index port (A0=0)
- *   0xA0281 PCS5  YM3812 data port          (A0=1)
- *   0xA0300 PCS6  DMD enable (init 0x80)  AND the OKI control latch
- *                 (phrase number in bits 0-6, channel select in bit 7)
+/* Bike Race (SLEIC3) PACS peripheral chip-select block at segment A000h (base 0xA0000,
+ * PCS0-PCS6 on 0x80 boundaries), read off schematic REF 011-026 sheets 3 and 4:
+ *   0xA0000 PCS0  IC32 74LS273 control latch: bit 1 YA0 (YM3812 A0), bit 2 /RCS,
+ *                 bit 3 2CH (OKI channel), bit 4 /ST (OKI start), bits 5-7 X9103 pot
+ *   0xA0080 PCS1  command byte to the I/O side (J1 link)
+ *   0xA0280 PCS5  YM3812 -- ONE address; index vs data is PCS0 bit 1 (net YA0)
+ *   0xA0300 PCS6  IC45 74LS273 OKI phrase latch, I0-I6 (bit 7 unconnected)
  *
- * YM3812 (IC60) = in-game FM music; OKI MSM6376 (IC51) = speech/FX. OKI trigger
- * model (exact latch bits await the IC7 PAL dump): a non-zero phrase written to
- * 0xA0300 ARMS a phrase, the next /OKCS rising edge (0xA0000 bit 5) STARTS it
- * -> locals.okiLatch / locals.okiPrevStrobe / locals.okiPending */
+ * YM3812 (IC41) = in-game FM music; OKI MSM6376 (IC46) = speech/FX, run as two
+ * channels selected by 2CH at the /ST edge -> sleic3_oki_strobe.  A phrase written to
+ * 0xA0300 ARMS the next /ST rising edge (0xA0000 bit 4), which STARTS it
+ * -> locals.okiLatch / locals.okiPrevStrobe / locals.okiPending.  sleic_oki_trigger
+ * just below is Pin-Ball's (SLEIC1) single-voice model and is left exactly as it was. */
 
 /* J1 inbound byte latch (IC43 at 80188 PCS2 = 0xA0100): the last byte the Z80 strobed
  * across the J1 port. The Z80's port-0x81 bit-2 strobe latches the byte AND raises the
@@ -776,33 +776,81 @@ static void sleic_oki_trigger(void) {
   OKIM6376_data_0_w(0, voice << 4);    /* trigger playback on the voice */
 }
 
+/* Bike Race (SLEIC3) OKI MSM6376 strobe.  Separate from sleic_oki_trigger above, which
+ * Pin-Ball (SLEIC1) shares and which must keep its byte-for-byte behaviour.
+ *
+ * The firmware runs the 6376 as TWO concurrent channels.  The channel is NOT a bit of
+ * the phrase byte -- every 0xA0300 write is masked with AND AL,07F first (E0CCE / E0CF9),
+ * and on the board bit 7 of the IC45 phrase latch is unconnected -- it is PCS0 bit 3,
+ * IC32 4Q = 2CH (schematic sheet 3 p122, OKI pin 63 on sheet 4).  The channel-1 trigger
+ * sub_E0CBF leaves 2CH high; the channel-2 trigger sub_E0CEA clears it (E0D0C-E0D14)
+ * around the /ST pulse (bit 4, IC32 5Q) and restores it after (E0D1B-E0D23), so the
+ * channel is the state of bit 3 at the /ST rising edge -- which is what this is given.
+ * Both channels reach the core's two 6376 voices (adpcm.c: bit 4 = voice 0, bit 5 =
+ * voice 1 on data >> 4); collapsing them onto one voice, as the old model did, made
+ * adpcm.c refuse the second of every overlapping pair (its start on a still-playing
+ * voice is dropped at OKIM6376_data_w) -- exactly how START issues phrase 19, the 4.7 s
+ * motor sample in BK03, on channel 2 while phrase 1 is still running on channel 1.
+ *
+ * The abort-before-start is the same as iomoon_oki_strobe: the firmware's only busy
+ * model is its own software counter per channel ([01BE] / [01C1]), which can expire a
+ * little before the emulated sample ends (the interface rate is ~2 % under the
+ * firmware-implied ~30.9 kHz), so a re-issue on a channel the firmware considers free
+ * must restart, not be refused.  Phrase 0 is the stop-all sub_E0D2D (latch 0, /ST held
+ * low, released two timer ticks later by sub_E0D7E): silence both voices. */
+static void sleic3_oki_strobe(UINT8 pcs0) {
+  const UINT8 phrase = locals.okiLatch & 0x7f;
+  const UINT8 voice  = (pcs0 & 0x08) ? 0 : 1;   /* 2CH high = channel 1 = voice 0 */
+  locals.okiPending = 0;
+#ifdef DEBUG_SLEIC
+  if (getenv("SLEIC_TRACE_SND")) fprintf(stderr, "[oki] phrase %02x ch%d\n", phrase, voice + 1);
+#endif
+  if (!phrase) {                                  /* sub_E0D2D stop-all                 */
+    OKIM6376_data_0_w(0, 0x18);                   /* no phrase pending: bits 3,4 = stop voices 0,1 */
+    return;
+  }
+  OKIM6376_data_0_w(0, (UINT8)(0x08 << voice));   /* abort this channel first            */
+  OKIM6376_data_0_w(0, (UINT8)(0x80 | phrase));   /* phrase number on D0-D6              */
+  OKIM6376_data_0_w(0, (UINT8)(0x10 << voice));   /* start it on the 2CH-selected voice  */
+}
+
 static WRITE_HANDLER(sleic_periph_w) {
 #ifdef DEBUG_SLEIC
   if (getenv("SLEIC_TRACE_PW")) fprintf(stderr, "[188->periph] PCS%d off=%03x data=%02x\n", offset>>7, offset, data);
 #endif
   switch (offset) {
-    case 0x280:                        /* PCS5: YM3812 port */
-      /* Bike Race wires the YM3812 to the single address 0xA0280 and toggles A0 in hardware
-       * per write, so it streams (register,value) pairs all to 0xA0280 */
+    case 0x280:                        /* PCS5: YM3812, single address */
+      /* Bike Race puts the YM3812 on the one address 0xA0280 and drives its A0 from a
+       * LATCHED control bit, PCS0 bit 1 (IC32 2Q = net YA0 -> IC81 pin 4, schematic
+       * sheets 3/4) -- the Pin-Ball scheme, not a per-write hardware toggle.  The only
+       * writer, sub_E0E0E, clears the bit (E0E12) before the index byte and sets it
+       * (E0E2A) before the data byte, so locals.ymA0 is set in case 0x000 below and
+       * simply read here.  (The old per-write toggle happened to agree with the latch
+       * on every reachable write of this ROM, but modelled an invariant of the ROM
+       * rather than the wiring.) */
       {
 #ifdef DEBUG_SLEIC
-        if (getenv("SLEIC_TRACE_SND")) fprintf(stderr, "[ym] %s %02x\n", locals.ymA0 ? "data":"reg ", data);
+        if (getenv("SLEIC_TRACE_SND")) fprintf(stderr, "[ym] %llu %s %02x\n", (unsigned long long)activecpu_gettotalcycles64(), locals.ymA0 ? "data":"reg ", data);
 #endif
         if (locals.ymA0) YM3812_write_port_0_w(0, data); else YM3812_control_port_0_w(0, data);
-        locals.ymA0 ^= 1;
       }
       return;
-    case 0x300:                        /* PCS6: DMD enable + OKI ctrl latch */
+    case 0x300:                        /* PCS6: IC45 74LS273 OKI phrase latch, I0-I6 */
       locals.okiLatch = data;
-      if (data & 0x7f) locals.okiPending = 1; /* real phrase (not 0x80 DMD-enable) */
+      /* Every value arms the next /ST edge, INCLUDING zero: latch 0 is the firmware's
+       * stop-all (sub_E0D2D writes 0 at E0D32, then pulses /ST), so gating this on a
+       * non-zero phrase silently discarded every stop and let a following priority
+       * phrase be refused by the core as "still playing". */
+      locals.okiPending = 1;
       break;
-    case 0x000:                        /* PCS0: OKI /OKCS strobe (bit 4) */
-      {
-        /* /OKCS strobe: Bike Race pulses PCS0 bit 4 (0x10). (Exact decode awaits the IC7 PAL20L10 dump) */
-        const UINT8 okcs = 0x10;
-        if (locals.okiPending && (data & okcs) && !(locals.okiPrevStrobe & okcs))
-          sleic_oki_trigger();
-      }
+    case 0x000:                        /* PCS0: IC32 control latch */
+      /* IC32 74LS273 (sheet 3 p122): bit 1 YA0 (YM3812 A0), bit 2 /RCS (driven low once
+       * at boot, never raised), bit 3 2CH (OKI channel), bit 4 /ST (OKI start strobe),
+       * bits 5-7 the X9103 volume pot.  A0 is latched here for case 0x280; the OKI
+       * channel is read from bit 3 at the /ST rising edge. */
+      locals.ymA0 = (data >> 1) & 1;
+      if (locals.okiPending && (data & 0x10) && !(locals.okiPrevStrobe & 0x10))
+        sleic3_oki_strobe(data);
       locals.okiPrevStrobe = data;
       break;
     case 0x080:                        /* PCS1: command byte the 80188 sends to the I/O side */
