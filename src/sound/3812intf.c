@@ -107,17 +107,11 @@ static void YM3812Write_ymfm(int n, int a, int v)
 {
 	if (a & 1) /* data port */
 	{
-		/* Render the stream up to this write's CPU time before applying it, exactly as the
-		 * legacy fmopl path always did (fmopl.c OPLWrite calls its UpdateHandler, i.e.
-		 * stream_update, before every data write) and as the YM2151 ymfm wrapper does
-		 * (2151intf.c YM2151_data_port_0_w -> YM2151UpdateRequest).  Without it every
+		/* Render the stream up to this write's CPU time before applying it.  Without it, every
 		 * write of a video frame lands on the chip at one instant.  ymfm detects a
 		 * key-on/key-off EDGE only per generated sample (ymfm_fm.ipp clock_keystate),
-		 * so a key-off immediately followed by a key-on inside the same frame -- how
-		 * sequencers re-strike a repeated note and retrigger 0xBD drums -- collapses to
-		 * key 1->1: no attack, the old note just sustains.  fmopl re-attacks at write
-		 * time and never showed this.  Address writes only set the register latch and
-		 * are left unflushed, matching fmopl. */
+		 * so e.g. a key-off immediately followed by a key-on inside the same frame collapses to
+		 * key 1->1: no attack, the old note just sustains */
 		stream_update(stream_3812[n], 0);
 		vgm_write(vgm_idx_3812[n], 0x00, lastreg_3812[n], v);
 		ymfm_opl_write(chip_3812[n], 1, v);
@@ -336,6 +330,7 @@ static void YM3526Write_ymfm(int n, int a, int v)
 {
 	if (a & 1) /* data port */
 	{
+		stream_update(stream_3526[n], 0);
 		vgm_write(vgm_idx_3526[n], 0x00, lastreg_3526[n], v);
 		ymfm_opl_write(chip_3526[n], 1, v);
 	}
