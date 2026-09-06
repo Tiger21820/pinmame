@@ -650,6 +650,7 @@ static void sleic_debug_switches(int troughCol, UINT8 troughDefault) {
   static int frame = 0;
   const char *e, *col, *bit;
   frame++;
+  if (getenv("SLEIC_TRACE_SND") && (frame % 60) == 0) fprintf(stderr, "[frame %d]\n", frame);
 
   if ((e = getenv("SLEIC_INJECT_CAB")))
     coreGlobals.swMatrix[9] |= (UINT8)strtol(e, NULL, 0);
@@ -743,20 +744,19 @@ static WRITE_HANDLER(pic_w) {
   logerror("PIC W(%03x->%2x) = %02x\n", offset, offset>>7, data);
 }
 
-/* PACS peripheral chip-select block at segment A000h (base 0xA0000,
- * 7 selects PCS0-PCS6 on 0x80 boundaries):
- *   0xA0000 PCS0  DMD control reg 1  AND the OKI /OKCS strobe (bit 5)
- *   0xA0080 PCS1  DMD control reg 2
- *   0xA0200 PCS4  DMD mode; bit 3 rising edge = swap-buffer / frame strobe
- *   0xA0280 PCS5  YM3812 register/index port (A0=0)
- *   0xA0281 PCS5  YM3812 data port          (A0=1)
- *   0xA0300 PCS6  DMD enable (init 0x80)  AND the OKI control latch
- *                 (phrase number in bits 0-6, channel select in bit 7)
+/* Bike Race (SLEIC3) PACS peripheral chip-select block at segment A000h (base 0xA0000,
+ * PCS0-PCS6 on 0x80 boundaries), read off schematic REF 011-026 sheets 3 and 4:
+ *   0xA0000 PCS0  IC32 74LS273 control latch: bit 1 YA0 (YM3812 A0), bit 2 /RCS,
+ *                 bit 3 2CH (OKI channel), bit 4 /ST (OKI start), bits 5-7 X9103 pot
+ *   0xA0080 PCS1  command byte to the I/O side (J1 link)
+ *   0xA0280 PCS5  YM3812 -- ONE address; index vs data is PCS0 bit 1 (net YA0)
+ *   0xA0300 PCS6  IC45 74LS273 OKI phrase latch, I0-I6 (bit 7 unconnected)
  *
- * YM3812 (IC60) = in-game FM music; OKI MSM6376 (IC51) = speech/FX. OKI trigger
- * model (exact latch bits await the IC7 PAL dump): a non-zero phrase written to
- * 0xA0300 ARMS a phrase, the next /OKCS rising edge (0xA0000 bit 5) STARTS it
- * -> locals.okiLatch / locals.okiPrevStrobe / locals.okiPending */
+ * YM3812 (IC41) = in-game FM music; OKI MSM6376 (IC46) = speech/FX, run as two
+ * channels selected by 2CH at the /ST edge -> sleic3_oki_strobe.  A phrase written to
+ * 0xA0300 ARMS the next /ST rising edge (0xA0000 bit 4), which STARTS it
+ * -> locals.okiLatch / locals.okiPrevStrobe / locals.okiPending.  sleic_oki_trigger
+ * just below is Pin-Ball's (SLEIC1) single-voice model and is left exactly as it was. */
 
 /* J1 inbound byte latch (IC43 at 80188 PCS2 = 0xA0100): the last byte the Z80 strobed
  * across the J1 port. The Z80's port-0x81 bit-2 strobe latches the byte AND raises the
@@ -776,33 +776,81 @@ static void sleic_oki_trigger(void) {
   OKIM6376_data_0_w(0, voice << 4);    /* trigger playback on the voice */
 }
 
+/* Bike Race (SLEIC3) OKI MSM6376 strobe.  Separate from sleic_oki_trigger above, which
+ * Pin-Ball (SLEIC1) shares and which must keep its byte-for-byte behaviour.
+ *
+ * The firmware runs the 6376 as TWO concurrent channels.  The channel is NOT a bit of
+ * the phrase byte -- every 0xA0300 write is masked with AND AL,07F first (E0CCE / E0CF9),
+ * and on the board bit 7 of the IC45 phrase latch is unconnected -- it is PCS0 bit 3,
+ * IC32 4Q = 2CH (schematic sheet 3 p122, OKI pin 63 on sheet 4).  The channel-1 trigger
+ * sub_E0CBF leaves 2CH high; the channel-2 trigger sub_E0CEA clears it (E0D0C-E0D14)
+ * around the /ST pulse (bit 4, IC32 5Q) and restores it after (E0D1B-E0D23), so the
+ * channel is the state of bit 3 at the /ST rising edge -- which is what this is given.
+ * Both channels reach the core's two 6376 voices (adpcm.c: bit 4 = voice 0, bit 5 =
+ * voice 1 on data >> 4); collapsing them onto one voice, as the old model did, made
+ * adpcm.c refuse the second of every overlapping pair (its start on a still-playing
+ * voice is dropped at OKIM6376_data_w) -- exactly how START issues phrase 19, the 4.7 s
+ * motor sample in BK03, on channel 2 while phrase 1 is still running on channel 1.
+ *
+ * The abort-before-start is the same as iomoon_oki_strobe: the firmware's only busy
+ * model is its own software counter per channel ([01BE] / [01C1]), which can expire a
+ * little before the emulated sample ends (the interface rate is ~2 % under the
+ * firmware-implied ~30.9 kHz), so a re-issue on a channel the firmware considers free
+ * must restart, not be refused.  Phrase 0 is the stop-all sub_E0D2D (latch 0, /ST held
+ * low, released two timer ticks later by sub_E0D7E): silence both voices. */
+static void sleic3_oki_strobe(UINT8 pcs0) {
+  const UINT8 phrase = locals.okiLatch & 0x7f;
+  const UINT8 voice  = (pcs0 & 0x08) ? 0 : 1;   /* 2CH high = channel 1 = voice 0 */
+  locals.okiPending = 0;
+#ifdef DEBUG_SLEIC
+  if (getenv("SLEIC_TRACE_SND")) fprintf(stderr, "[oki] phrase %02x ch%d\n", phrase, voice + 1);
+#endif
+  if (!phrase) {                                  /* sub_E0D2D stop-all                 */
+    OKIM6376_data_0_w(0, 0x18);                   /* no phrase pending: bits 3,4 = stop voices 0,1 */
+    return;
+  }
+  OKIM6376_data_0_w(0, (UINT8)(0x08 << voice));   /* abort this channel first            */
+  OKIM6376_data_0_w(0, (UINT8)(0x80 | phrase));   /* phrase number on D0-D6              */
+  OKIM6376_data_0_w(0, (UINT8)(0x10 << voice));   /* start it on the 2CH-selected voice  */
+}
+
 static WRITE_HANDLER(sleic_periph_w) {
 #ifdef DEBUG_SLEIC
   if (getenv("SLEIC_TRACE_PW")) fprintf(stderr, "[188->periph] PCS%d off=%03x data=%02x\n", offset>>7, offset, data);
 #endif
   switch (offset) {
-    case 0x280:                        /* PCS5: YM3812 port */
-      /* Bike Race wires the YM3812 to the single address 0xA0280 and toggles A0 in hardware
-       * per write, so it streams (register,value) pairs all to 0xA0280 */
+    case 0x280:                        /* PCS5: YM3812, single address */
+      /* Bike Race puts the YM3812 on the one address 0xA0280 and drives its A0 from a
+       * LATCHED control bit, PCS0 bit 1 (IC32 2Q = net YA0 -> IC81 pin 4, schematic
+       * sheets 3/4) -- the Pin-Ball scheme, not a per-write hardware toggle.  The only
+       * writer, sub_E0E0E, clears the bit (E0E12) before the index byte and sets it
+       * (E0E2A) before the data byte, so locals.ymA0 is set in case 0x000 below and
+       * simply read here.  (The old per-write toggle happened to agree with the latch
+       * on every reachable write of this ROM, but modelled an invariant of the ROM
+       * rather than the wiring.) */
       {
 #ifdef DEBUG_SLEIC
-        if (getenv("SLEIC_TRACE_SND")) fprintf(stderr, "[ym] %s %02x\n", locals.ymA0 ? "data":"reg ", data);
+        if (getenv("SLEIC_TRACE_SND")) fprintf(stderr, "[ym] %llu %s %02x\n", (unsigned long long)activecpu_gettotalcycles64(), locals.ymA0 ? "data":"reg ", data);
 #endif
         if (locals.ymA0) YM3812_write_port_0_w(0, data); else YM3812_control_port_0_w(0, data);
-        locals.ymA0 ^= 1;
       }
       return;
-    case 0x300:                        /* PCS6: DMD enable + OKI ctrl latch */
+    case 0x300:                        /* PCS6: IC45 74LS273 OKI phrase latch, I0-I6 */
       locals.okiLatch = data;
-      if (data & 0x7f) locals.okiPending = 1; /* real phrase (not 0x80 DMD-enable) */
+      /* Every value arms the next /ST edge, INCLUDING zero: latch 0 is the firmware's
+       * stop-all (sub_E0D2D writes 0 at E0D32, then pulses /ST), so gating this on a
+       * non-zero phrase silently discarded every stop and let a following priority
+       * phrase be refused by the core as "still playing". */
+      locals.okiPending = 1;
       break;
-    case 0x000:                        /* PCS0: OKI /OKCS strobe (bit 4) */
-      {
-        /* /OKCS strobe: Bike Race pulses PCS0 bit 4 (0x10). (Exact decode awaits the IC7 PAL20L10 dump) */
-        const UINT8 okcs = 0x10;
-        if (locals.okiPending && (data & okcs) && !(locals.okiPrevStrobe & okcs))
-          sleic_oki_trigger();
-      }
+    case 0x000:                        /* PCS0: IC32 control latch */
+      /* IC32 74LS273 (sheet 3 p122): bit 1 YA0 (YM3812 A0), bit 2 /RCS (driven low once
+       * at boot, never raised), bit 3 2CH (OKI channel), bit 4 /ST (OKI start strobe),
+       * bits 5-7 the X9103 volume pot.  A0 is latched here for case 0x280; the OKI
+       * channel is read from bit 3 at the /ST rising edge. */
+      locals.ymA0 = (data >> 1) & 1;
+      if (locals.okiPending && (data & 0x10) && !(locals.okiPrevStrobe & 0x10))
+        sleic3_oki_strobe(data);
       locals.okiPrevStrobe = data;
       break;
     case 0x080:                        /* PCS1: command byte the 80188 sends to the I/O side */
@@ -1376,8 +1424,8 @@ MEMORY_END
  *   MCS0 0x00000-0x1FFFF : work RAM (boot stack 012F:0203; the boot copies its IVT
  *                          image from CS:00C4 to physical 0 before STI, so the
  *                          driver must NOT overwrite the IVT)
- *   MCS1 0x20000-0x3FFFF : graphics ROM bkcpu05
- *   MCS2 0x40000-0x5FFFF : graphics ROM bkcpu06 (read via ES=0x5000)
+ *   MCS1 0x20000-0x3FFFF : graphics ROM bkcpu06 (sprite table in its first 0x1104)
+ *   MCS2 0x40000-0x5FFFF : graphics ROM bkcpu05 (read via ES=0x5000)
  *   MCS3 0x60000-0x7FFFF : DMD / video frame buffer RAM (panel staging at 0x60410)
  * PACS=0xA03C -> peripheral block at 0xA0000, so sleic_periph_r/w are used.
  * UMCS -> bkcpu04 code at 0xE0000-0xFFFFF (reset EA F000:0000). */
@@ -1896,15 +1944,23 @@ static MACHINE_INIT(SLEIC) {
    * ball-status query strobes COL4 (out 0x82 = 0x10), reads it into 0xC0DB and replies
    * over J1. The set of monitored optos and reply codes DIFFERS BY VERSION -- the Z80 I/O
    * ROM (bkio07.bin vs 07.bin) is one of the two ROMs that differ between the games:
+   * The contact names below are the firmware's own, decoded from its code->C-number->name
+   * table at linear 0xF373D (5-byte records Cnum|name_off16|name_seg, indexed
+   * [F000:0x370B + code*5]); the name pool is length-prefixed DMD glyph indices, 0x0A =
+   * space and 0x0B.. = A..Z with N-tilde inserted after N:
+   *     code 0x2C bit 0x04 = C22 "EXPULSOR 1"
+   *     code 0x2F bit 0x20 = C6  "SALIDA BOLAS"
+   *     code 0x30 bit 0x40 = C7  "BOLA EN ESPERA"
+   *     code 0x31 bit 0x80 = C8  "BOLA FUERA"
    *   bikerace (bkio07, handler 0x0B1D -> sub 0x0B31, replies 0x0B7C/0x0B9D): monitors
-   *     COL4 bits 0x04 (code 0x2C, key 3), 0x20 (C7 "Bola Retenida", key 8) and
-   *     0x80 (C8 "Bola fuera", key 9). Reply 0x5D "BOLAS OK" / 0x5B "FALTA 1 BOLA";
-   *     a ball at C7 OR C8 -> BOLAS OK, so standalone-test by holding key 8 (or 9).
+   *     COL4 bits 0x04 (C22, key 3), 0x20 (C6 "Salida Bolas", key 8) and
+   *     0x80 (C8 "Bola Fuera", key 9). Reply 0x5D "BOLAS OK" / 0x5B "FALTA 1 BOLA";
+   *     a ball at C6 OR C8 -> BOLAS OK, so standalone-test by holding key 8 (or 9).
    *   bikerac2 (07.bin, sub 0x0B72, replies 0x0C0B/0x0C16/0x0C37): monitors the same three
-   *     PLUS bit 0x40 (code 0x30, key '-') and counts missing balls -- reply adds
-   *     0x5C "FALTA 2 BOLAS". "BOLAS OK" needs two optos INCLUDING the '-' sensor
+   *     PLUS bit 0x40 (C7 "Bola en Espera", key '-') and counts missing balls -- reply adds
+   *     0x5C "FALTA 2 BOLAS". "BOLAS OK" needs two optos INCLUDING C7
    *     (combos 0x20+0x40 or 0x40+0x80), so standalone-test by holding '-' with 8 or 9;
-   *     holding only 8+9 (no '-') never reports OK. (Verified against the disassembly of both
+   *     holding only 8+9 (no C7) never reports OK. (Verified against the disassembly of both
    *     Z80 ROMs; the key bindings already exist in sleic3_pf_keys below.)
    * The driver does not fabricate the ball complement -- the frontend (e.g. VPX)
    * supplies trough state; the keys above are only for standalone testing */
@@ -2420,9 +2476,15 @@ static SWITCH_UPDATE(SLEIC2) {
  * the port-0x82 one-hot column strobe); code = 0x0A + 8*(col-1) + row. Mapping every
  * position to a key lets the CONTACTOS self-test verify each contact. COL4 (swMatrix[5])
  * is the trough column. The Z80 cmd-0xD5 ball-status handler monitors COL4 bits 0x04
- * (code 0x2C, key 3), 0x20 = C7 (key 8) and 0x80 = C8 (key 9) on BOTH versions, plus
- * bit 0x40 (code 0x30, key '-') on bikerac2 only; see the per-version breakdown in the
- * MACHINE_INIT trough comment above */
+ * (C22, key 3), 0x20 = C6 "Salida Bolas" (key 8) and 0x80 = C8 "Bola Fuera" (key 9) on
+ * all three sets, plus bit 0x40 = C7 "Bola en Espera" (key '-') on bikerac2 AND
+ * bikerac3, which share the same F000 code revision; see the per-version breakdown and
+ * the source of those names in the MACHINE_INIT trough comment above.
+ *
+ * What that means for filling the trough by hand: bikerace clears with either 8+9 or
+ * 8+'-', but bikerac2 and bikerac3 need 8+'-' -- 8+9 alone leaves them sitting on
+ * "FALTAN n BOLAS" (measured: 5 and 6 distinct DMD frames against 110 and 111). The
+ * SLEIC_TROUGH default mask 0xE0 closes 8, '-' and 9 together and serves all three */
 static const struct { int key; UINT8 col; UINT8 bit; } sleic3_pf_keys[] = {
   {KEYCODE_Q,1,0x01},{KEYCODE_W,1,0x02},{KEYCODE_E,1,0x04},{KEYCODE_R,1,0x08}, /* COL0 0x0A-0x0D */
   {KEYCODE_Y,1,0x10},{KEYCODE_U,1,0x20},{KEYCODE_I,1,0x40},{KEYCODE_O,1,0x80}, /* COL0 0x0E-0x11 */
@@ -2433,12 +2495,58 @@ static const struct { int key; UINT8 col; UINT8 bit; } sleic3_pf_keys[] = {
   {KEYCODE_0_PAD,4,0x01},{KEYCODE_1_PAD,4,0x02},{KEYCODE_2_PAD,4,0x04},{KEYCODE_3_PAD,4,0x08}, /* COL3 0x22-0x25 */
   {KEYCODE_4_PAD,4,0x10},{KEYCODE_5_PAD,4,0x20},{KEYCODE_6_PAD,4,0x40},{KEYCODE_7_PAD,4,0x80}, /* COL3 0x26-0x29 */
   {KEYCODE_0,5,0x01},{KEYCODE_2,5,0x02},{KEYCODE_3,5,0x04},{KEYCODE_4,5,0x08}, /* COL4 0x2A-0x2D */
-  {KEYCODE_6,5,0x10},{KEYCODE_8,5,0x20},{KEYCODE_MINUS,5,0x40},{KEYCODE_9,5,0x80}, /* COL4 0x2E; trough optos: 0x2F=C7(key8) 0x31=C8(key9) both versions, 0x30=key'-' bikerac2-only (+0x2C=key3); 0x30 is on '-' rather than 7 because 7 is the test/service key (sleic.h); see trough notes above */
+  {KEYCODE_6,5,0x10},{KEYCODE_8,5,0x20},{KEYCODE_MINUS,5,0x40},{KEYCODE_9,5,0x80}, /* COL4 0x2E; trough optos: 0x2F=C6 "Salida Bolas"(key8), 0x30=C7 "Bola en Espera"(key'-'), 0x31=C8 "Bola Fuera"(key9), +0x2C=C22(key3); C7 is on '-' rather than 7 because 7 is the test/service key (sleic.h); see trough notes above */
 };
+
+/*-------------------------------------------------------------------------------------
+/  Bike Race (SLEIC3) ball-present model -- OPT-IN, AND OFF BY DEFAULT.
+/
+/  Same bargain as Io Moon's trough model: under a frontend a table script owns the ball
+/  optos and reports them, so the driver must not fabricate them, and with "Balls" at its
+/  default 0 it does not.  Standalone there is nothing to close them, and the machine sits
+/  on "FALTA n BOLAS" until something does -- which is correct, but means holding two
+/  matrix keys down for the whole session before a game can be started.  Setting "Balls"
+/  to any non-zero value hands that job to the driver.
+/
+/  This is a SIMPLER model than Io Moon's, deliberately.  Io Moon's trough is three
+/  contacts in a line with a kicker command (0xE9) and a drain sensor, so the state a ball
+/  is in can be tracked and each contact driven from it.  What Bike Race exposes on COL4
+/  is a ball-PRESENT check answered by the Z80's cmd-0xD5 handler, and no serve command
+/  has been identified in either Z80 ROM.  So nothing here tracks a ball count or a
+/  kicker: it presents the complement the firmware wants to see, and the cabinet port's
+/  "Ball out of trough" key lifts it.  Inventing a serve would be inventing mechanics the
+/  disassembly does not show.
+/
+/  THE MASK.  0xE0 closes all three of COL4's monitored optos at once, which satisfies
+/  every version's rule without the driver having to know which set is running:
+/    bikerace  wants a ball at C6 0x20 OR C8 0x80                     -> 0xE0 satisfies it
+/    bikerac2  wants two INCLUDING C7 0x40 (0x20+0x40 or 0x40+0x80)   -> 0xE0 satisfies it
+/    bikerac3  shares bikerac2's Z80 code revision, so the same rule
+/  Measured over 2000 headless frames with two coins and START, distinct DMD frames:
+/  104 / 107 / 111 with the mask against 5-6 for the sets that need 0x40 without it.
+/  See the per-version breakdown in the MACHINE_INIT trough comment above.
+/-----------------------------------------------------------------------------------*/
+#define SLEIC3_TROUGH_COL   5     /* swMatrix index of Z80 switch column 4 (COL4)       */
+#define SLEIC3_TROUGH_BITS  0xE0  /* C6 | C7 | C8, the three monitored optos; see above  */
+
+/* Called from SWITCH_UPDATE(SLEIC3) AFTER the playfield key loop, and it ORs its bits in
+ * rather than assigning them, for the same reason Io Moon's does: a matrix test key held
+ * on one of these positions is a contact stuck closed, which is what the service menu's
+ * contact test wants to see, and the model has no business overriding it.
+ *
+ * balls = the simulator port's "Balls" setting, 0 (the default) meaning model off.
+ * out   = the cabinet port's "Ball out of trough", held while the ball is away. */
+static void sleic3_ball_update(int balls, int out) {
+  if (balls <= 0 || out) return;
+  coreGlobals.swMatrix[SLEIC3_TROUGH_COL] |= SLEIC3_TROUGH_BITS;
+}
 
 static SWITCH_UPDATE(SLEIC3) {
   unsigned i;
+  int balls = 0, out = 0;
   if (inports) {
+    balls = SIM_BALLS(inports[CORE_SIMINPORT]);
+    out   = (inports[CORE_COREINPORT] & 0x1000) ? 1 : 0;
     /* Cabinet/direct buttons are all on Z80 port 0x03 (swMatrix[9]), bit -> contact:
      *   bit0 = C17 Tilt        (code 0x32, also menu ENTER)
      *   bit1 = C4  Test        (code 0x33 = menu ENTER)
@@ -2460,8 +2568,10 @@ static SWITCH_UPDATE(SLEIC3) {
     else
       coreGlobals.swMatrix[sleic3_pf_keys[i].col] &= ~sleic3_pf_keys[i].bit;
   }
+  /* After the key loop, because it ORs its optos in on top -- see the comment on it */
+  sleic3_ball_update(balls, out);
 #ifdef DEBUG_SLEIC
-  sleic_debug_switches(5, 0xE0); /* COL4: C7 0x20 | '-' sensor 0x40 (bikerac2) | C8 0x80 */
+  sleic_debug_switches(5, SLEIC3_TROUGH_BITS); /* COL4 optos, same mask the model uses */
 #endif
 }
 
